@@ -76,6 +76,17 @@ test("caller questions are answered before qualification resumes", () => {
   assert.match(SBA_INBOUND_SCRIPT, /Is there anything else I can answer for you\?/i);
 });
 
+test("qualification transitions prohibit internal narration and repetitive confirmations", () => {
+  assert.match(SBA_INBOUND_SCRIPT, /Never speak internal thinking, planning, deliberation, workflow selection, or next-step selection aloud/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Never say "Let me think about the next step/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Never use more than one acknowledgment phrase in a turn/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Do not repeat or summarize the caller's answer/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Do not say "thank you" after routine entity, time-in-business, credit, or revenue answers/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Confirm or clarify only when the answer is unclear/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Required scheduling confirmation remains unchanged/i);
+  assert.match(SBA_INBOUND_SCRIPT, /clear credit answer such as "about 700" should lead directly to a brief acknowledgment and the gross-monthly-revenue question/i);
+});
+
 test("ready-to-start path still completes qualification", () => {
   assert.match(SBA_INBOUND_SCRIPT, /READY_TO_START: the caller is ready to start/i);
   assert.match(SBA_INBOUND_SCRIPT, /The next step is our SBA Help Center readiness application/i);
