@@ -124,6 +124,71 @@ test("city and contact values map to supplied SBA columns", () => {
   assert.deepEqual(values[SBA_BOARD.columns.updatedDate], { date: "2026-08-01" });
 });
 
+test("live qualification mutation payload contains all four required column IDs", () => {
+  const values = buildSbaMondayUpdateValues({
+    data: {
+      city: "Tampa",
+      business_entity_type: "LLC",
+      entity_status: "Complete",
+      estimated_credit_score: "680+",
+      credit_status: "Done",
+      gross_monthly_revenue: "$5,000 - $25,000",
+      income_status: "Done",
+      updated_date: "2026-08-01T12:00:00.000Z"
+    },
+    metadata
+  });
+  assert.deepEqual(
+    Object.keys(values).sort(),
+    [
+      "color_mm5626jc",
+      "color_mm56cyba",
+      "color_mm56g2kn",
+      "date_mm3mzfd4",
+      "dropdown_mm3m39yk",
+      "dropdown_mm3m9731",
+      "dropdown_mm3mpa8p",
+      "text_mm4nfn2e"
+    ].sort()
+  );
+});
+
+test("inbound phone comparison normalizes common Monday formats", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const source = server.match(/function normalizePhone\(value\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(source, "normalizePhone source must be present");
+  const normalizePhone = new Function(
+    "cleanText",
+    `${source}; return normalizePhone;`
+  )((value, maximum) => String(value || "").trim().slice(0, maximum));
+  for (const formatted of [
+    "+18135551212",
+    "(813) 555-1212",
+    "813-555-1212"
+  ]) {
+    assert.equal(normalizePhone(formatted), "+18135551212");
+  }
+});
+
+test("missing monday item IDs trigger linkage recovery before updates", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /"MONDAY_ITEM_ID_MISSING"/);
+  assert.match(server, /await ensureInboundMondayCaller\(call\);\s*call = \(await getCallById\(call\.call_id\)\)/);
+  assert.match(server, /await ensureInboundMondayCaller\(call\);\s*call = \(await getCallById\(call\.call_id\)\) \|\| call;\s*inboundLog\("\[MONDAY_LINK\]", "incoming_call_link_result"/);
+  assert.match(server, /UPDATE ai_calls SET monday_item_id = \$2/);
+});
+
+test("production-safe Monday diagnostics cover linkage, tool, and mutation stages", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /"\[MONDAY_LINK\]", "phone_search_started"/);
+  assert.match(server, /"\[MONDAY_LINK\]", "item_id_persisted"/);
+  assert.match(server, /"\[MONDAY_SAVE_TOOL\]", "tool_invoked"/);
+  assert.match(server, /"\[MONDAY_UPDATE\]", "qualification_update_attempt"/);
+  assert.match(server, /"\[MONDAY_UPDATE\]", "graphql_response"/);
+  assert.match(server, /"\[MONDAY_UPDATE\]", "mutation_confirmed"/);
+  assert.doesNotMatch(server, /"\[MONDAY_UPDATE\]", "raw_graphql_response"/);
+});
+
 test("blank qualification values produce no Monday overwrites", () => {
   const values = buildSbaMondayUpdateValues({
     data: {

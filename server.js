@@ -3573,13 +3573,19 @@ async function mondayGraphql(query, variables = {}, diagnostic = null) {
       body = { raw_response: cleanText(rawResponseBody, 4000) };
     }
     if (diagnostic?.always_log_raw_response) {
-      inboundLog("[MONDAY_UPDATE]", "raw_graphql_response", {
+      const graphqlErrors = Array.isArray(body.errors)
+        ? body.errors.map((entry) => ({
+            message: cleanText(entry?.message, 500),
+            error_code: cleanText(entry?.extensions?.error_code, 100) || null
+          }))
+        : [];
+      inboundLog("[MONDAY_UPDATE]", "graphql_response", {
         call_id: diagnostic.call_id || null,
         monday_item_id: diagnostic.monday_item_id || null,
         board_id: diagnostic.board_id || MONDAY_BOARD_ID,
         http_status: response.status,
-        raw_response: cleanText(rawResponseBody, 10000),
-        graphql_errors: Array.isArray(body.errors) ? body.errors : []
+        graphql_errors: graphqlErrors,
+        update_success: response.ok && graphqlErrors.length === 0
       });
     }
     if (diagnostic && !diagnostic.update_logging_only) {
@@ -3600,6 +3606,20 @@ async function mondayGraphql(query, variables = {}, diagnostic = null) {
     return data;
   } catch (error) {
     inboundMondayConnectionHealthy = false;
+    if (diagnostic?.always_log_raw_response) {
+      inboundLog("[MONDAY_UPDATE]", "graphql_request_failed", {
+        call_id: diagnostic.call_id || null,
+        monday_item_id: diagnostic.monday_item_id || null,
+        board_id: diagnostic.board_id || MONDAY_BOARD_ID,
+        http_status: error.httpStatus || null,
+        graphql_errors: (error.mondayErrors || []).map((entry) => ({
+          message: cleanText(entry?.message, 500),
+          error_code: cleanText(entry?.extensions?.error_code, 100) || null
+        })),
+        update_success: false,
+        error: cleanText(error.message, 500)
+      });
+    }
     if (diagnostic) {
       inboundLog("[MONDAY_DIAGNOSTIC]", "api_request_failed", {
         ...diagnostic,
@@ -3720,9 +3740,24 @@ function sbaProfileFromMondayItem(item) {
   };
 }
 
-async function findInboundCallersByPhone(phone) {
+async function findInboundCallersByPhone(phone, options = {}) {
   const normalized = normalizePhone(phone);
-  if (!normalized || !INBOUND_MONDAY_CONNECTED) return [];
+  inboundLog("[MONDAY_LINK]", "phone_search_started", {
+    call_id: cleanText(options.callId, 100),
+    normalized_caller_phone_last4: maskedPhoneLastFour(normalized),
+    search_attempted: Boolean(normalized && INBOUND_MONDAY_CONNECTED)
+  });
+  if (!normalized || !INBOUND_MONDAY_CONNECTED) {
+    inboundLog("[MONDAY_LINK]", "phone_search_completed", {
+      call_id: cleanText(options.callId, 100),
+      normalized_caller_phone_last4: maskedPhoneLastFour(normalized),
+      match_count: 0,
+      existing_item_id: null,
+      multiple_matches: false,
+      search_skipped: true
+    });
+    return [];
+  }
   const phoneColumnId = INBOUND_MONDAY.columns.phoneNumber;
   const firstPage = await mondayGraphql(
     `query FindInboundCaller($boardIds: [ID!]!) {
@@ -3757,11 +3792,20 @@ async function findInboundCallersByPhone(phone) {
     );
     page = nextPage.next_items_page || {};
   }
+  inboundLog("[MONDAY_LINK]", "phone_search_completed", {
+    call_id: cleanText(options.callId, 100),
+    normalized_caller_phone_last4: maskedPhoneLastFour(normalized),
+    match_count: matches.length,
+    existing_item_id: matches.length === 1 ? String(matches[0].id) : null,
+    multiple_matches: matches.length > 1
+  });
   return matches;
 }
 
 async function lookupExistingSbaLead(call, identifiers = {}) {
-  const matches = await findInboundCallersByPhone(call?.phone);
+  const matches = await findInboundCallersByPhone(call?.phone, {
+    callId: call?.call_id
+  });
   const email = normalizeInboundEmail(identifiers.email);
   const expectedName = normalizeMondayKey(
     [identifiers.first_name, identifiers.last_name].filter(Boolean).join(" ")
@@ -3938,11 +3982,23 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
             call_id: cleanText(options.callId, 100),
             monday_item_id: String(itemId),
             board_id: MONDAY_BOARD_ID,
+            operation: "change_multiple_column_values",
             always_log_raw_response: true,
             update_logging_only: true
           }
     );
-    updated = result.change_multiple_column_values || updated;
+    const changed = result.change_multiple_column_values;
+    if (!changed?.id) {
+      throw new Error("monday.com did not return an item ID for the column update.");
+    }
+    updated = changed;
+    inboundLog("[MONDAY_UPDATE]", "mutation_confirmed", {
+      call_id: cleanText(options.callId, 100),
+      monday_item_id: String(changed.id),
+      board_id: MONDAY_BOARD_ID,
+      column_ids: Object.keys(columnValues),
+      update_success: true
+    });
   }
   const name = cleanText(data.full_name || data.name, 160);
   if (name) {
@@ -3965,7 +4021,35 @@ async function updateInboundCallerFromSession(
   overrides = {},
   options = {}
 ) {
-  if (!call?.monday_item_id || !INBOUND_MONDAY_CONNECTED) return null;
+  if (!INBOUND_MONDAY_CONNECTED) {
+    inboundLog("[MONDAY_UPDATE]", "update_skipped_not_configured", {
+      call_id: call?.call_id || null,
+      update_success: false
+    });
+    return null;
+  }
+  if (!call?.monday_item_id) {
+    inboundLog("[MONDAY_LINK]", "MONDAY_ITEM_ID_MISSING", {
+      call_id: call?.call_id || null,
+      recovery_attempted: Boolean(call?.call_id)
+    });
+    if (call?.call_id) {
+      await ensureInboundMondayCaller(call);
+      call = (await getCallById(call.call_id)) || call;
+    }
+    if (!call?.monday_item_id) {
+      inboundLog("[MONDAY_LINK]", "missing_item_recovery_failed", {
+        call_id: call?.call_id || null,
+        identity_disambiguation_required:
+          call?.result?.sba_lead_match_status === "multiple_matches"
+      });
+      return null;
+    }
+    inboundLog("[MONDAY_LINK]", "missing_item_recovered", {
+      call_id: call.call_id,
+      monday_item_id: String(call.monday_item_id)
+    });
+  }
   const snapshot = inboundCallSnapshot(call, overrides);
   const previousSnapshot = call.result?.inbound_monday_snapshot || null;
   if (inboundValuesEqual(previousSnapshot, snapshot)) {
@@ -4376,6 +4460,12 @@ async function persistFinalInboundSession(data = {}) {
 
 async function syncInboundMondayCaller(call) {
   if (!call || !INBOUND_MONDAY_CONNECTED) return null;
+  const normalizedCallerPhone = normalizePhone(call.phone);
+  inboundLog("[MONDAY_LINK]", "link_started", {
+    call_id: call.call_id,
+    normalized_caller_phone_last4: maskedPhoneLastFour(normalizedCallerPhone),
+    current_monday_item_id: call.monday_item_id || null
+  });
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
@@ -4388,6 +4478,10 @@ async function syncInboundMondayCaller(call) {
     const latestCall = locked.rows[0] || call;
     if (latestCall.monday_item_id) {
       await client.query("COMMIT");
+      inboundLog("[MONDAY_LINK]", "link_already_present", {
+        call_id: call.call_id,
+        monday_item_id: String(latestCall.monday_item_id)
+      });
       return { id: String(latestCall.monday_item_id) };
     }
     call = latestCall;
@@ -4410,8 +4504,15 @@ async function syncInboundMondayCaller(call) {
     }
     const resolved = await retryTransientOperation(
       async () => {
-        const matches = await findInboundCallersByPhone(call.phone);
+        const matches = await findInboundCallersByPhone(call.phone, {
+          callId: call.call_id
+        });
         if (matches.length === 1) {
+          inboundLog("[MONDAY_LINK]", "existing_item_matched", {
+            call_id: call.call_id,
+            match_count: 1,
+            existing_item_id: String(matches[0].id)
+          });
           return {
             item: matches[0],
             existing: true,
@@ -4419,11 +4520,21 @@ async function syncInboundMondayCaller(call) {
           };
         }
         if (matches.length > 1) {
+          inboundLog("[MONDAY_LINK]", "multiple_items_matched", {
+            call_id: call.call_id,
+            match_count: matches.length,
+            identity_disambiguation_required: true
+          });
           return { item: null, existing: false, multiple: true, matchCount: matches.length };
         }
         const item = await createInboundCallerItem(initialData, {
           callId: call.call_id,
           twilioCallSid: call.twilio_call_sid
+        });
+        inboundLog("[MONDAY_LINK]", "new_item_created", {
+          call_id: call.call_id,
+          match_count: 0,
+          newly_created_item_id: item?.id ? String(item.id) : null
         });
         return { item, existing: false };
       },
@@ -4457,6 +4568,12 @@ async function syncInboundMondayCaller(call) {
           })
         ]
       );
+      inboundLog("[MONDAY_LINK]", "item_id_persisted", {
+        call_id: call.call_id,
+        monday_item_id: String(item.id),
+        existing_item: Boolean(existing),
+        written_to_ai_calls: true
+      });
     }
     if (item?.id) {
       if (existing) {
@@ -4506,7 +4623,7 @@ async function syncInboundMondayCaller(call) {
     try {
       await client.query("ROLLBACK");
     } catch {}
-    inboundLog("[MONDAY]", "inbound_item_sync_failed", {
+    inboundLog("[MONDAY_LINK]", "link_failed", {
       call_id: call.call_id,
       caller_phone: maskedPhoneLastFour(call.phone),
       error: cleanText(error.message, 300)
@@ -4591,11 +4708,16 @@ async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
   let call = await getCallById(callId);
   if (!call) throw new Error("The call session was not found.");
   if (!call.monday_item_id) {
+    inboundLog("[MONDAY_LINK]", "MONDAY_ITEM_ID_MISSING", {
+      call_id: callId,
+      recovery_attempted: true,
+      source: "save_inbound_caller_context"
+    });
     await ensureInboundMondayCaller(call);
     call = await getCallById(callId);
   }
   const itemId = cleanText(call?.monday_item_id, 100);
-  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_item_resolved", {
+  inboundLog("[MONDAY_LINK]", "save_tool_item_result", {
     call_id: callId,
     monday_item_id: itemId || null,
     found: Boolean(itemId)
@@ -4615,7 +4737,7 @@ async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
       .filter(Boolean),
     SBA_QUALIFICATION_COLUMN_IDS.updated_date
   ])];
-  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_attempt", {
+  inboundLog("[MONDAY_UPDATE]", "qualification_update_attempt", {
     call_id: callId,
     monday_item_id: itemId,
     logical_fields: logicalFields,
@@ -4644,7 +4766,7 @@ async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
       })
     ]
   );
-  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_succeeded", {
+  inboundLog("[MONDAY_UPDATE]", "qualification_update_succeeded", {
     call_id: callId,
     monday_item_id: itemId,
     logical_fields: logicalFields,
@@ -7049,9 +7171,11 @@ async function executeInboundToolUnlocked(call, name, args) {
       (field) => safeArgs[field] !== undefined && safeArgs[field] !== null &&
         (typeof safeArgs[field] !== "string" || safeArgs[field].trim() !== "")
     );
-    inboundLog("[SBA_PERSISTENCE_TEST]", "tool_called", {
+    inboundLog("[MONDAY_SAVE_TOOL]", "tool_invoked", {
       call_id: call.call_id,
-      logical_fields: receivedQualificationFields
+      tool: "save_inbound_caller_context",
+      logical_fields: receivedQualificationFields,
+      current_monday_item_id: call.monday_item_id || null
     });
     const suppliedIntent = cleanText(safeArgs.intent, 80);
     if (suppliedIntent && !SUPPORTED_INBOUND_INTENTS.includes(suppliedIntent)) {
@@ -7232,7 +7356,7 @@ async function executeInboundToolUnlocked(call, name, args) {
            WHERE call_id = $1`,
           [call.call_id, cleanText(error.message, 1000)]
         );
-        inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_failed", {
+        inboundLog("[MONDAY_UPDATE]", "qualification_update_failed", {
           call_id: call.call_id,
           logical_fields: receivedQualificationFields,
           error: cleanText(error.message, 300)
@@ -8669,8 +8793,16 @@ app.post(["/incoming-call", "/api/v1/twilio/inbound"], async (req, res, next) =>
         caller_phone: maskedPhoneLastFour(callerPhone),
         twilio_call_sid: twilioCallSid
       });
-      await ensureInboundMondayCaller(call);
     }
+
+    await ensureInboundMondayCaller(call);
+    call = (await getCallById(call.call_id)) || call;
+    inboundLog("[MONDAY_LINK]", "incoming_call_link_result", {
+      call_id: call.call_id,
+      normalized_caller_phone_last4: maskedPhoneLastFour(normalizePhone(call.phone)),
+      monday_item_id: call.monday_item_id || null,
+      linked_before_twiml: Boolean(call.monday_item_id)
+    });
 
     const response = new twilio.twiml.VoiceResponse();
     const connect = response.connect();
