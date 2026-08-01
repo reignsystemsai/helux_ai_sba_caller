@@ -25,7 +25,8 @@ const {
 const {
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
-  buildSbaQualificationSessionPatch
+  buildSbaQualificationSessionPatch,
+  selectBestSbaMondayMatch
 } = require("./sba-monday-persistence");
 
 /* Inlined production dependencies — formerly ./src modules */
@@ -3764,7 +3765,7 @@ async function findInboundCallersByPhone(phone, options = {}) {
       boards(ids: $boardIds) {
         items_page(limit: 500) {
           cursor
-          items { id name group { id } column_values { id text value } }
+          items { id name created_at updated_at group { id } column_values { id text value } }
         }
       }
     }`,
@@ -3785,7 +3786,7 @@ async function findInboundCallersByPhone(phone, options = {}) {
       `query FindInboundCallerNextPage($cursor: String!) {
         next_items_page(limit: 500, cursor: $cursor) {
           cursor
-          items { id name group { id } column_values { id text value } }
+          items { id name created_at updated_at group { id } column_values { id text value } }
         }
       }`,
       { cursor }
@@ -3815,16 +3816,35 @@ async function lookupExistingSbaLead(call, identifiers = {}) {
     if (email && profile?.email === email) return true;
     return Boolean(expectedName && normalizeMondayKey(profile?.full_name) === expectedName);
   });
-  const candidates = narrowed.length ? narrowed : matches;
-  if (candidates.length !== 1) {
+  const linkedItemId = cleanText(call?.monday_item_id, 100);
+  const linkedItem = linkedItemId
+    ? matches.find((item) => String(item?.id) === linkedItemId)
+    : null;
+  const candidates = linkedItem ? [linkedItem] : narrowed.length ? narrowed : matches;
+  if (candidates.length === 0) {
     return {
       success: true,
       found: false,
-      status: candidates.length > 1 ? "multiple_matches" : "not_found",
-      match_count: candidates.length
+      status: "not_found",
+      match_count: 0
     };
   }
-  const item = candidates[0];
+  const selection = selectBestSbaMondayMatch(candidates);
+  if (!selection?.item?.id) {
+    throw new Error("The SBA lead lookup did not resolve a monday.com item ID.");
+  }
+  const item = selection.item;
+  const selectionReason = linkedItem
+    ? "already_linked_item"
+    : selection.selection_reason;
+  if (candidates.length > 1) {
+    inboundLog("[MONDAY_LINK]", "multiple_matches_resolved", {
+      call_id: call.call_id,
+      match_count: candidates.length,
+      selected_item_id: String(item.id),
+      selection_reason: selectionReason
+    });
+  }
   const profile = sbaProfileFromMondayItem(item);
   await pool.query(
     `UPDATE ai_calls SET monday_item_id = $2, monday_group_id = $3,
@@ -3836,6 +3856,7 @@ async function lookupExistingSbaLead(call, identifiers = {}) {
       JSON.stringify({
         ...profile,
         sba_lead_match_status: "matched",
+        sba_lead_selection_reason: selectionReason,
         existing_profile_loaded: true
       })
     ]
@@ -4507,25 +4528,30 @@ async function syncInboundMondayCaller(call) {
         const matches = await findInboundCallersByPhone(call.phone, {
           callId: call.call_id
         });
-        if (matches.length === 1) {
+        if (matches.length > 0) {
+          const selection = selectBestSbaMondayMatch(matches);
+          if (!selection?.item?.id) {
+            throw new Error("A phone match was returned without a resolvable monday.com item ID.");
+          }
+          if (matches.length > 1) {
+            inboundLog("[MONDAY_LINK]", "multiple_matches_resolved", {
+              call_id: call.call_id,
+              match_count: matches.length,
+              selected_item_id: String(selection.item.id),
+              selection_reason: selection.selection_reason
+            });
+          }
           inboundLog("[MONDAY_LINK]", "existing_item_matched", {
             call_id: call.call_id,
-            match_count: 1,
-            existing_item_id: String(matches[0].id)
+            match_count: matches.length,
+            existing_item_id: String(selection.item.id)
           });
           return {
-            item: matches[0],
+            item: selection.item,
             existing: true,
-            profile: sbaProfileFromMondayItem(matches[0])
+            profile: sbaProfileFromMondayItem(selection.item),
+            selectionReason: selection.selection_reason
           };
-        }
-        if (matches.length > 1) {
-          inboundLog("[MONDAY_LINK]", "multiple_items_matched", {
-            call_id: call.call_id,
-            match_count: matches.length,
-            identity_disambiguation_required: true
-          });
-          return { item: null, existing: false, multiple: true, matchCount: matches.length };
         }
         const item = await createInboundCallerItem(initialData, {
           callId: call.call_id,
@@ -4555,68 +4581,58 @@ async function syncInboundMondayCaller(call) {
         }
       }
     );
-    const { item, existing, profile, multiple, matchCount } = resolved;
-    if (multiple) {
-      await client.query(
-        `UPDATE ai_calls SET result = result || $2::jsonb, updated_at = NOW()
-         WHERE call_id = $1`,
-        [
-          call.call_id,
-          JSON.stringify({
-            sba_lead_match_status: "multiple_matches",
-            sba_lead_match_count: matchCount
-          })
-        ]
-      );
-      inboundLog("[MONDAY_LINK]", "item_id_persisted", {
-        call_id: call.call_id,
-        monday_item_id: String(item.id),
-        existing_item: Boolean(existing),
-        written_to_ai_calls: true
+    const { item, existing, profile, selectionReason } = resolved;
+    if (!item?.id) {
+      throw new Error("Monday linkage did not resolve or create an item ID.");
+    }
+    const resolvedItemId = String(item.id);
+    if (existing) {
+      await updateInboundCallerItem(resolvedItemId, {
+        phone: initialData.phone,
+        updated_date: new Date().toISOString()
+      }, {
+        callId: call.call_id
       });
     }
-    if (item?.id) {
-      if (existing) {
-        await updateInboundCallerItem(item.id, {
+    await client.query(
+      `UPDATE ai_calls SET monday_item_id = $2, monday_group_id = $3,
+       monday_last_sync_at = NOW(), monday_last_error = NULL,
+       result = result || $4::jsonb, updated_at = NOW()
+       WHERE call_id = $1`,
+      [
+        call.call_id,
+        resolvedItemId,
+        item.group?.id || INBOUND_MONDAY.groups.newInboundCalls,
+        JSON.stringify({
+          ...(profile || {}),
+          full_name: profile?.full_name || initialData.full_name,
+          first_name: profile?.first_name || initialData.first_name,
+          last_name: profile?.last_name || initialData.last_name,
+          city: profile?.city || initialData.city,
+          zip: profile?.zip || initialData.zip,
           phone: initialData.phone,
-          updated_date: new Date().toISOString()
-        }, {
-          callId: call.call_id
-        });
-      }
-      await client.query(
-        `UPDATE ai_calls SET monday_item_id = $2, monday_group_id = $3,
-         monday_last_sync_at = NOW(), monday_last_error = NULL,
-         result = result || $4::jsonb, updated_at = NOW()
-         WHERE call_id = $1`,
-        [
-          call.call_id,
-          String(item.id),
-          item.group?.id || INBOUND_MONDAY.groups.newInboundCalls,
-          JSON.stringify({
-            ...(profile || {}),
-            full_name: profile?.full_name || initialData.full_name,
-            first_name: profile?.first_name || initialData.first_name,
-            last_name: profile?.last_name || initialData.last_name,
-            city: profile?.city || initialData.city,
-            zip: profile?.zip || initialData.zip,
-            phone: initialData.phone,
-            email: profile?.email || initialData.email,
-            date_called: initialData.date_called,
-            summary: initialData.summary,
-            caller_type: "Inbound Call",
-            call_status: initialData.call_status,
-            follow_up_needed: initialData.follow_up_needed,
-            lead_source: initialData.lead_source,
-            sba_lead_match_status: existing ? "matched" : "new",
-            existing_profile_loaded: Boolean(existing && profile),
-            inbound_monday_snapshot: initialData,
-            monday_item_id: String(item.id),
-            call_sid: call.twilio_call_sid || null
-          })
-        ]
-      );
-    }
+          email: profile?.email || initialData.email,
+          date_called: initialData.date_called,
+          summary: initialData.summary,
+          caller_type: "Inbound Call",
+          call_status: initialData.call_status,
+          follow_up_needed: initialData.follow_up_needed,
+          lead_source: initialData.lead_source,
+          sba_lead_match_status: existing ? "matched" : "new",
+          sba_lead_selection_reason: selectionReason || null,
+          existing_profile_loaded: Boolean(existing && profile),
+          inbound_monday_snapshot: initialData,
+          monday_item_id: resolvedItemId,
+          call_sid: call.twilio_call_sid || null
+        })
+      ]
+    );
+    inboundLog("[MONDAY_LINK]", "item_id_persisted", {
+      call_id: call.call_id,
+      monday_item_id: resolvedItemId,
+      existing_item: Boolean(existing),
+      written_to_ai_calls: true
+    });
     await client.query("COMMIT");
     return item;
   } catch (error) {

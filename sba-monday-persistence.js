@@ -56,6 +56,90 @@ function key(value) {
   return clean(value, 200).toLowerCase().replace(/[^a-z0-9]+/g, "");
 }
 
+function mondayItemColumnText(item, columnId) {
+  return clean(
+    item?.column_values?.find((column) => column.id === columnId)?.text,
+    500
+  );
+}
+
+function mondayItemProfileScore(item) {
+  const weightedColumns = [
+    [SBA_BOARD.columns.firstName, 4],
+    [SBA_BOARD.columns.lastName, 4],
+    [SBA_BOARD.columns.email, 6],
+    [SBA_BOARD.columns.city, 2],
+    [SBA_BOARD.columns.zip, 2],
+    [SBA_BOARD.columns.businessEntityType, 3],
+    [SBA_BOARD.columns.taxes, 2],
+    [SBA_BOARD.columns.estimatedCreditScore, 3],
+    [SBA_BOARD.columns.grossMonthlyRevenue, 3],
+    [SBA_BOARD.columns.leadId, 3]
+  ];
+  return weightedColumns.reduce(
+    (score, [columnId, weight]) =>
+      score + (mondayItemColumnText(item, columnId) ? weight : 0),
+    0
+  );
+}
+
+function mondayItemTimestamp(value) {
+  const timestamp = Date.parse(clean(value, 100));
+  return Number.isFinite(timestamp) ? timestamp : 0;
+}
+
+function compareMondayItemIdsDescending(left, right) {
+  const leftId = clean(left?.id, 100);
+  const rightId = clean(right?.id, 100);
+  if (/^\d+$/.test(leftId) && /^\d+$/.test(rightId)) {
+    const leftNumeric = BigInt(leftId);
+    const rightNumeric = BigInt(rightId);
+    return leftNumeric === rightNumeric ? 0 : leftNumeric > rightNumeric ? -1 : 1;
+  }
+  return rightId.localeCompare(leftId, "en", { numeric: true });
+}
+
+function selectBestSbaMondayMatch(matches = []) {
+  const candidates = matches.filter((item) => item?.id);
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) {
+    return {
+      item: candidates[0],
+      selection_reason: "only_phone_match",
+      profile_score: mondayItemProfileScore(candidates[0])
+    };
+  }
+
+  const ranked = candidates
+    .map((item) => ({
+      item,
+      profile_score: mondayItemProfileScore(item),
+      updated_at: mondayItemTimestamp(item.updated_at),
+      created_at: mondayItemTimestamp(item.created_at)
+    }))
+    .sort((left, right) =>
+      right.profile_score - left.profile_score ||
+      right.updated_at - left.updated_at ||
+      right.created_at - left.created_at ||
+      compareMondayItemIdsDescending(left.item, right.item)
+    );
+
+  const selected = ranked[0];
+  const runnerUp = ranked[1];
+  const selectionReason = selected.profile_score !== runnerUp.profile_score
+    ? "strongest_profile_data"
+    : selected.updated_at !== runnerUp.updated_at
+      ? "most_recently_updated"
+      : selected.created_at !== runnerUp.created_at
+        ? "most_recently_created"
+        : "highest_item_id";
+  return {
+    item: selected.item,
+    selection_reason: selectionReason,
+    profile_score: selected.profile_score
+  };
+}
+
 function buildSbaQualificationSessionPatch(data = {}) {
   return Object.fromEntries(
     SBA_QUALIFICATION_SESSION_FIELDS
@@ -154,5 +238,6 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
 module.exports = {
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
-  buildSbaQualificationSessionPatch
+  buildSbaQualificationSessionPatch,
+  selectBestSbaMondayMatch
 };

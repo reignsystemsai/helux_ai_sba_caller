@@ -122,8 +122,8 @@ test("existing caller lookup hydrates a unique SBA phone match", () => {
   const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
   assert.match(server, /async function findInboundCallersByPhone\(phone, options = \{\}\)/);
   assert.match(server, /normalizePhone\(value\?\.text\) === normalized/);
-  assert.match(server, /matches\.length === 1/);
-  assert.match(server, /profile: sbaProfileFromMondayItem\(matches\[0\]\)/);
+  assert.match(server, /selectBestSbaMondayMatch\(candidates\)/);
+  assert.match(server, /profile: sbaProfileFromMondayItem\(selection\.item\)/);
   assert.match(server, /existing_profile_loaded: Boolean\(existing && profile\)/);
 });
 

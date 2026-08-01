@@ -9,7 +9,8 @@ const { SBA_BOARD } = require("./sba-inbound");
 const {
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
-  buildSbaQualificationSessionPatch
+  buildSbaQualificationSessionPatch,
+  selectBestSbaMondayMatch
 } = require("./sba-monday-persistence");
 
 const metadata = {
@@ -46,6 +47,82 @@ const metadata = {
     }
   ]
 };
+
+function mondayMatch({
+  id,
+  updatedAt = "2026-01-01T00:00:00Z",
+  createdAt = "2025-01-01T00:00:00Z",
+  fields = {}
+}) {
+  return {
+    id: String(id),
+    updated_at: updatedAt,
+    created_at: createdAt,
+    group: { id: "topics" },
+    column_values: Object.entries(fields).map(([columnId, text]) => ({
+      id: columnId,
+      text
+    }))
+  };
+}
+
+test("zero phone matches remain unresolved so the caller item is created", () => {
+  assert.equal(selectBestSbaMondayMatch([]), null);
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /const item = await createInboundCallerItem\(initialData/);
+});
+
+test("exactly one phone match selects that existing item", () => {
+  const item = mondayMatch({ id: "100" });
+  const selected = selectBestSbaMondayMatch([item]);
+  assert.equal(selected.item.id, "100");
+  assert.equal(selected.selection_reason, "only_phone_match");
+});
+
+test("multiple phone matches prefer the populated SBA lead", () => {
+  const blankNewerItem = mondayMatch({
+    id: "300",
+    updatedAt: "2026-07-01T00:00:00Z"
+  });
+  const populatedItem = mondayMatch({
+    id: "200",
+    updatedAt: "2026-06-01T00:00:00Z",
+    fields: {
+      [SBA_BOARD.columns.firstName]: "Avery",
+      [SBA_BOARD.columns.lastName]: "Stone",
+      [SBA_BOARD.columns.email]: "avery@example.com"
+    }
+  });
+  const selected = selectBestSbaMondayMatch([blankNewerItem, populatedItem]);
+  assert.equal(selected.item.id, "200");
+  assert.equal(selected.selection_reason, "strongest_profile_data");
+});
+
+test("multiple populated phone matches prefer the most recently updated item", () => {
+  const older = mondayMatch({
+    id: "400",
+    updatedAt: "2026-06-01T00:00:00Z",
+    fields: { [SBA_BOARD.columns.email]: "avery@example.com" }
+  });
+  const newer = mondayMatch({
+    id: "350",
+    updatedAt: "2026-07-01T00:00:00Z",
+    fields: { [SBA_BOARD.columns.email]: "avery@example.com" }
+  });
+  const selected = selectBestSbaMondayMatch([older, newer]);
+  assert.equal(selected.item.id, "350");
+  assert.equal(selected.selection_reason, "most_recently_updated");
+});
+
+test("multiple phone matches always resolve deterministically and never return null", () => {
+  const selected = selectBestSbaMondayMatch([
+    mondayMatch({ id: "900" }),
+    mondayMatch({ id: "901" })
+  ]);
+  assert.ok(selected?.item);
+  assert.equal(selected.item.id, "901");
+  assert.equal(selected.selection_reason, "highest_item_id");
+});
 
 test("save_inbound_caller_context schema accepts every qualification field", () => {
   const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
@@ -124,6 +201,59 @@ test("city and contact values map to supplied SBA columns", () => {
   assert.deepEqual(values[SBA_BOARD.columns.updatedDate], { date: "2026-08-01" });
 });
 
+test("all supplied SBA intake fields retain their existing Monday column mappings", () => {
+  const values = buildSbaMondayUpdateValues({
+    data: {
+      first_name: "Avery",
+      last_name: "Stone",
+      phone: "+18135551212",
+      email: "avery@example.com",
+      city: "Tampa",
+      zip: "33602",
+      business_entity_type: "LLC",
+      entity_status: "Complete",
+      taxes: "Filed",
+      tax_status: "Complete",
+      estimated_credit_score: "680+",
+      credit_status: "Done",
+      gross_monthly_revenue: "$5,000 - $25,000",
+      income_status: "Done",
+      updated_date: "2026-08-01T12:00:00.000Z",
+      lead_id: "LEAD-100"
+    },
+    metadata: {
+      columns: [
+        ...metadata.columns,
+        {
+          id: SBA_BOARD.columns.taxStatus,
+          title: "Tax_Status",
+          settings: { labels: { 1: "Complete" } }
+        }
+      ]
+    }
+  });
+  for (const columnId of [
+    SBA_BOARD.columns.firstName,
+    SBA_BOARD.columns.lastName,
+    SBA_BOARD.columns.phoneNumber,
+    SBA_BOARD.columns.email,
+    SBA_BOARD.columns.city,
+    SBA_BOARD.columns.zip,
+    SBA_BOARD.columns.businessEntityType,
+    SBA_BOARD.columns.entityStatus,
+    SBA_BOARD.columns.taxes,
+    SBA_BOARD.columns.taxStatus,
+    SBA_BOARD.columns.estimatedCreditScore,
+    SBA_BOARD.columns.creditStatus,
+    SBA_BOARD.columns.grossMonthlyRevenue,
+    SBA_BOARD.columns.incomeStatus,
+    SBA_BOARD.columns.updatedDate,
+    SBA_BOARD.columns.leadId
+  ]) {
+    assert.ok(Object.hasOwn(values, columnId), `${columnId} must be in the mutation payload`);
+  }
+});
+
 test("live qualification mutation payload contains all four required column IDs", () => {
   const values = buildSbaMondayUpdateValues({
     data: {
@@ -176,6 +306,28 @@ test("missing monday item IDs trigger linkage recovery before updates", () => {
   assert.match(server, /await ensureInboundMondayCaller\(call\);\s*call = \(await getCallById\(call\.call_id\)\)/);
   assert.match(server, /await ensureInboundMondayCaller\(call\);\s*call = \(await getCallById\(call\.call_id\)\) \|\| call;\s*inboundLog\("\[MONDAY_LINK\]", "incoming_call_link_result"/);
   assert.match(server, /UPDATE ai_calls SET monday_item_id = \$2/);
+});
+
+test("resolved duplicate item ID persists and is reused by qualification mutations", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const syncStart = server.indexOf("async function syncInboundMondayCaller");
+  const syncEnd = server.indexOf("async function ensureInboundMondayCaller", syncStart);
+  const syncSource = server.slice(syncStart, syncEnd);
+  assert.match(syncSource, /"multiple_matches_resolved"/);
+  assert.match(syncSource, /if \(!item\?\.id\) \{\s*throw new Error/);
+  assert.match(syncSource, /const resolvedItemId = String\(item\.id\)/);
+  assert.match(syncSource, /UPDATE ai_calls SET monday_item_id = \$2/);
+  assert.match(syncSource, /call\.call_id,\s*resolvedItemId/);
+  assert.match(syncSource, /"item_id_persisted"/);
+  assert.doesNotMatch(syncSource, /item: null/);
+
+  const qualificationStart = server.indexOf(
+    "async function persistSbaQualificationFieldsToMonday"
+  );
+  const qualificationEnd = server.indexOf("async function lookupOutboundCaller", qualificationStart);
+  const qualificationSource = server.slice(qualificationStart, qualificationEnd);
+  assert.match(qualificationSource, /const itemId = cleanText\(call\?\.monday_item_id/);
+  assert.match(qualificationSource, /updateInboundCallerItem\(itemId, qualificationPatch/);
 });
 
 test("production-safe Monday diagnostics cover linkage, tool, and mutation stages", () => {
