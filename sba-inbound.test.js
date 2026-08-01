@@ -118,8 +118,13 @@ test("existing caller lookup hydrates a unique SBA phone match", () => {
 
 test("SBA Monday updates use supplied IDs and nonblank field mapping", () => {
   const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
-  assert.match(server, /function buildSbaMondayUpdateValues/);
-  assert.match(server, /if \(value\) values\[columnId\] = value/);
-  assert.match(server, /inboundMondayColumnByTitle\(metadata, \[columnTitle\]\)/);
+  const adapter = fs.readFileSync(
+    path.join(__dirname, "sba-monday-persistence.js"),
+    "utf8"
+  );
+  assert.match(server, /buildSbaMondayUpdateValues/);
+  assert.match(server, /persistSbaQualificationFieldsToMonday/);
+  assert.match(adapter, /if \(value\) values\[columnId\] = value/);
+  assert.match(adapter, /columnByIdOrTitle\(metadata, columnId, title\)/);
   assert.doesNotMatch(server, /buildInboundMondayUpdateValues\(/);
 });

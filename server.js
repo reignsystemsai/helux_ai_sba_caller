@@ -22,6 +22,11 @@ const {
   SBA_OPENING,
   buildSbaScheduledClosing
 } = require("./sba-inbound");
+const {
+  SBA_QUALIFICATION_COLUMN_IDS,
+  buildSbaMondayUpdateValues,
+  buildSbaQualificationSessionPatch
+} = require("./sba-monday-persistence");
 
 /* Inlined production dependencies — formerly ./src modules */
 
@@ -3656,57 +3661,6 @@ function resolveInboundMondayLabel(column, desiredLabel) {
   ) || null;
 }
 
-function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
-  const values = {};
-  const skip = typeof onSkippedColumn === "function"
-    ? onSkippedColumn
-    : () => undefined;
-  const textFields = [
-    ["first_name", INBOUND_MONDAY.columns.firstName],
-    ["last_name", INBOUND_MONDAY.columns.lastName],
-    ["taxes", INBOUND_MONDAY.columns.taxes],
-    ["city", INBOUND_MONDAY.columns.city],
-    ["lead_id", INBOUND_MONDAY.columns.leadId]
-  ];
-  for (const [field, columnId] of textFields) {
-    const value = cleanInboundContactValue(data[field], 500);
-    if (value) values[columnId] = value;
-  }
-  const email = normalizeInboundEmail(data.email);
-  if (email) values[INBOUND_MONDAY.columns.email] = { email, text: email };
-  const zip = cleanText(data.zip, 20)?.replace(/[^0-9]/g, "") || "";
-  if (zip) values[INBOUND_MONDAY.columns.zip] = zip;
-
-  const dropdownFields = [
-    ["business_entity_type", INBOUND_MONDAY.columns.businessEntityType, "Business Entity Type", normalizeSbaEntityType(data.business_entity_type)],
-    ["estimated_credit_score", INBOUND_MONDAY.columns.estimatedCreditScore, "Estimated Credit Score", normalizeSbaCreditRange(data.estimated_credit_score || data.credit_score)],
-    ["gross_monthly_revenue", INBOUND_MONDAY.columns.grossMonthlyRevenue, "Gross Monthly Revenue", normalizeSbaRevenueRange(data.gross_monthly_revenue)]
-  ];
-  for (const [field, columnId, columnTitle, desiredLabel] of dropdownFields) {
-    if (!desiredLabel) continue;
-    const column = inboundMondayColumn(metadata, columnId) ||
-      inboundMondayColumnByTitle(metadata, [columnTitle]);
-    const label = resolveInboundMondayLabel(column, desiredLabel);
-    if (label && column?.id) values[column.id] = { labels: [label] };
-    else skip({ field, columnId, desiredValue: desiredLabel, reason: "dropdown_label_not_found" });
-  }
-
-  const statusFields = [
-    ["entity_status", INBOUND_MONDAY.columns.entityStatus, data.entity_status],
-    ["tax_status", INBOUND_MONDAY.columns.taxStatus, data.tax_status],
-    ["credit_status", INBOUND_MONDAY.columns.creditStatus, data.credit_status],
-    ["income_status", INBOUND_MONDAY.columns.incomeStatus, data.income_status]
-  ];
-  for (const [field, columnId, desiredLabel] of statusFields) {
-    if (!desiredLabel) continue;
-    const column = inboundMondayColumn(metadata, columnId);
-    const label = resolveInboundMondayLabel(column, desiredLabel);
-    if (label) values[columnId] = { label };
-    else skip({ field, columnId, desiredValue: desiredLabel, reason: "status_label_not_found" });
-  }
-  return values;
-}
-
 async function inboundMondayValues(data = {}, diagnostic = null) {
   const metadata = await loadInboundMondayMetadata(false, diagnostic);
   const values = {};
@@ -3937,8 +3891,10 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     call_id: cleanText(options.callId, 100),
     monday_item_id: String(itemId),
     board_id: MONDAY_BOARD_ID,
-    column_values: columnValues,
-    serialized_column_values: serializedColumnValues
+    logical_fields: Object.keys(data).filter((field) =>
+      data[field] !== undefined && data[field] !== null && data[field] !== ""
+    ),
+    column_ids: Object.keys(columnValues)
   });
   if (diagnostic) {
     inboundLog("[MONDAY_DIAGNOSTIC]", "update_payload", {
@@ -4236,6 +4192,7 @@ function buildInboundCompletionSummary(call, completionStatus, sourceSummary) {
       `Funding request: ${cleanText(result.funding_amount, 100) || "Not provided"}`,
       `Use of funds: ${cleanText(result.funding_use, 500) || "Not provided"}`,
       `Business profile: ${[result.business_entity_type, result.industry].filter(Boolean).join(", ") || "Not provided"}`,
+      `Location: ${[result.city, result.state].filter(Boolean).join(", ") || "Not provided"}`,
       `Time in business: ${cleanText(result.time_in_business, 200) || "Not provided"}`,
       `Monthly revenue: ${cleanText(result.gross_monthly_revenue, 120) || "Not provided"}`,
       `Estimated credit: ${cleanText(result.estimated_credit_score, 100) || "Not provided"}`,
@@ -4628,6 +4585,72 @@ async function persistCallSessionToMonday(callId, options = {}) {
     payload: persisted.payload,
     skipped: persisted.result?.skipped === true
   };
+}
+
+async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
+  let call = await getCallById(callId);
+  if (!call) throw new Error("The call session was not found.");
+  if (!call.monday_item_id) {
+    await ensureInboundMondayCaller(call);
+    call = await getCallById(callId);
+  }
+  const itemId = cleanText(call?.monday_item_id, 100);
+  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_item_resolved", {
+    call_id: callId,
+    monday_item_id: itemId || null,
+    found: Boolean(itemId)
+  });
+  if (!itemId) throw new Error("The monday.com item ID is unavailable.");
+
+  const qualificationPatch = {
+    ...buildSbaQualificationSessionPatch(fields),
+    updated_date: new Date().toISOString()
+  };
+  const logicalFields = Object.keys(qualificationPatch).filter(
+    (field) => field !== "updated_date"
+  );
+  const expectedColumnIds = [...new Set([
+    ...logicalFields
+      .map((field) => SBA_QUALIFICATION_COLUMN_IDS[field])
+      .filter(Boolean),
+    SBA_QUALIFICATION_COLUMN_IDS.updated_date
+  ])];
+  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_attempt", {
+    call_id: callId,
+    monday_item_id: itemId,
+    logical_fields: logicalFields,
+    column_ids: expectedColumnIds
+  });
+
+  const updated = await retryTransientOperation(
+    () => updateInboundCallerItem(itemId, qualificationPatch, {
+      callId,
+      source: "save_inbound_caller_context"
+    }),
+    { maxAttempts: 3 }
+  );
+  if (!updated?.id) throw new Error("monday.com did not confirm the qualification update.");
+
+  call = (await getCallById(callId)) || call;
+  const snapshot = inboundCallSnapshot(call, qualificationPatch);
+  await pool.query(
+    `UPDATE ai_calls SET monday_last_sync_at = NOW(), monday_last_error = NULL,
+     result = result || $2::jsonb, updated_at = NOW() WHERE call_id = $1`,
+    [
+      callId,
+      JSON.stringify({
+        inbound_monday_snapshot: snapshot,
+        monday_item_id: itemId
+      })
+    ]
+  );
+  inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_succeeded", {
+    call_id: callId,
+    monday_item_id: itemId,
+    logical_fields: logicalFields,
+    column_ids: expectedColumnIds
+  });
+  return { success: true, monday_item_id: itemId, logical_fields: logicalFields };
 }
 
 function isInboundCallSession(call) {
@@ -6996,6 +7019,19 @@ const INBOUND_TOOL_NAMES = new Set([
   "create_funding_specialist_handoff"
 ]);
 
+const SBA_QUALIFICATION_TOOL_FIELDS = Object.freeze([
+  "city",
+  "state",
+  "business_entity_type",
+  "time_in_business",
+  "estimated_credit_score",
+  "gross_monthly_revenue",
+  "first_name",
+  "last_name",
+  "email",
+  "phone_number"
+]);
+
 async function executeInboundTool(call, name, args) {
   const callId = cleanText(call?.call_id, 100);
   if (!callId) return { success: false, error: "The call session is unavailable." };
@@ -7009,6 +7045,14 @@ async function executeInboundToolUnlocked(call, name, args) {
   const safeArgs = args && typeof args === "object" ? args : {};
 
   if (name === "save_inbound_caller_context") {
+    const receivedQualificationFields = SBA_QUALIFICATION_TOOL_FIELDS.filter(
+      (field) => safeArgs[field] !== undefined && safeArgs[field] !== null &&
+        (typeof safeArgs[field] !== "string" || safeArgs[field].trim() !== "")
+    );
+    inboundLog("[SBA_PERSISTENCE_TEST]", "tool_called", {
+      call_id: call.call_id,
+      logical_fields: receivedQualificationFields
+    });
     const suppliedIntent = cleanText(safeArgs.intent, 80);
     if (suppliedIntent && !SUPPORTED_INBOUND_INTENTS.includes(suppliedIntent)) {
       return { success: false, error: "A supported inbound intent is required." };
@@ -7177,31 +7221,20 @@ async function executeInboundToolUnlocked(call, name, args) {
     let mondayPersisted = !INBOUND_MONDAY_CONNECTED;
     if (INBOUND_MONDAY_CONNECTED) {
       try {
-        const persisted = await persistCallSessionToMonday(call.call_id, {
-          alreadySerialized: true,
-          overrides: {
-            business_entity_type: savedFields.business_entity_type,
-            entity_status: savedFields.entity_status,
-            estimated_credit_score: savedFields.estimated_credit_score,
-            credit_status: savedFields.credit_status,
-            gross_monthly_revenue: savedFields.gross_monthly_revenue,
-            income_status: savedFields.income_status,
-            taxes: savedFields.taxes,
-            tax_status: savedFields.tax_status,
-            city: savedFields.city,
-            zip: savedFields.zip,
-            lead_id: savedFields.lead_id,
-            summary: savedFields.call_summary,
-            call_status: savedFields.call_outcome,
-            caller_type: "Inbound Call",
-            lead_source: savedFields.lead_source,
-            phone: phoneNumber
-          }
-        });
+        const persisted = await persistSbaQualificationFieldsToMonday(
+          call.call_id,
+          savedFields
+        );
         mondayPersisted = persisted?.success === true;
       } catch (error) {
-        inboundLog("[MONDAY]", "caller_context_update_failed", {
+        await pool.query(
+          `UPDATE ai_calls SET monday_last_error = $2, updated_at = NOW()
+           WHERE call_id = $1`,
+          [call.call_id, cleanText(error.message, 1000)]
+        );
+        inboundLog("[SBA_PERSISTENCE_TEST]", "monday_update_failed", {
           call_id: call.call_id,
+          logical_fields: receivedQualificationFields,
           error: cleanText(error.message, 300)
         });
       }
