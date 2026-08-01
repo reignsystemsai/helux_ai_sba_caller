@@ -8789,7 +8789,7 @@ app.get(
   }
 );
 
-app.post("/api/v1/twilio/inbound", async (req, res, next) => {
+app.post(["/incoming-call", "/api/v1/twilio/inbound"], async (req, res, next) => {
   try {
     const callerPhone = normalizePhone(req.body.From);
     const calledNumber = normalizePhone(req.body.To) || cleanText(req.body.To, 50);
