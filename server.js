@@ -6,7 +6,6 @@ const twilio = require("twilio");
 const WebSocket = require("ws");
 const { WebSocketServer } = WebSocket;
 const {
-  buildInboundMondayUpdateValues,
   KeyedSerialQueue,
   mondayDateValue: buildInboundMondayDateValue,
   normalizeLocalDate,
@@ -15,6 +14,12 @@ const {
   retryTransientOperation,
   validateMondayEnvelope
 } = require("./inbound-persistence");
+const {
+  SBA_BOARD,
+  SBA_INBOUND_SCRIPT,
+  SBA_INTENTS,
+  SBA_OPENING
+} = require("./sba-inbound");
 
 /* Inlined production dependencies — formerly ./src modules */
 
@@ -192,6 +197,7 @@ async function routeIntent({ toolName, args, call, execute }) {
 
 const INLINE_RATE_RESPONSE = "That will be covered by your DPA Program Specialist when you speak with them. Interest rates and loan details depend on the individual homebuyer's situation, so I'm not permitted to discuss or estimate them.";
 const INLINE_RATE_REDIRECT = "What I can help you with is getting started through the readiness application at dpahelpcenter.com.";
+const SBA_RATE_RESPONSE = "Rates and terms vary by program, lender, credit profile, business financials, loan structure, and underwriting, so I don't want to quote you something inaccurate.";
 
 function isInterestRateQuestion(value) {
   const text = String(value || "").toLowerCase();
@@ -228,9 +234,9 @@ function inlineRequestsProhibitedInformation(value) {
   return INLINE_PROHIBITED_REQUESTS.some((pattern) => pattern.test(String(value || "")));
 }
 
-function guardAssistantOutput(value) {
-  if (inlineAssistantRateViolation(value)) return { allowed: false, code: "INTEREST_RATE_POLICY", replacement: interestRateResponse() };
-  if (inlineRequestsProhibitedInformation(value)) return { allowed: false, code: "SENSITIVE_INFORMATION_REQUEST", replacement: "I don't need that sensitive information. Let's continue with the non-sensitive information needed for your DPA next step." };
+function guardAssistantOutput(value, callPhase = "INBOUND") {
+  if (inlineAssistantRateViolation(value)) return { allowed: false, code: "INTEREST_RATE_POLICY", replacement: callPhase === "INBOUND" ? SBA_RATE_RESPONSE : interestRateResponse() };
+  if (inlineRequestsProhibitedInformation(value)) return { allowed: false, code: "SENSITIVE_INFORMATION_REQUEST", replacement: callPhase === "INBOUND" ? "I don't need that sensitive information. We can continue with the non-sensitive business information needed for your funding profile." : "I don't need that sensitive information. Let's continue with the non-sensitive information needed for your DPA next step." };
   if (INLINE_UNSCRIPTED_FILLER.some((pattern) => pattern.test(String(value || "")))) {
     return {
       allowed: false,
@@ -645,7 +651,7 @@ async function createConfirmedAppointment({ pool, input, now = new Date() }) {
 
 /*
  * HELUX AI INBOUND CALLS - DAISY INBOUND DEMO
- * Daisy, the DPA Help Center inbound receptionist.
+ * Daisy, the SBA Help Center inbound virtual funding assistant.
  * monday.com failures never block or terminate a customer call.
  */
 
@@ -755,45 +761,18 @@ const INBOUND_MONDAY_DIAGNOSTICS_ONCE =
     .toLowerCase() === "true";
 const INBOUND_MONDAY = Object.freeze({
   boards: Object.freeze({
-    inbound: String(process.env.INBOUND_BOARD_ID || "18422988712"),
-    subitems: String(process.env.INBOUND_SUBITEM_BOARD_ID || "18422988748")
+    inbound: SBA_BOARD.mainBoardId,
+    subitems: SBA_BOARD.subitemBoardId
   }),
   groups: Object.freeze({
-    newInboundCalls: "topics",
-    formLinkSent: "group_mm5ed1xf",
-    existingApplicantFollowUp: "group_mm5edjt",
-    transferredToOutbound: "group_mm5ee1qb",
-    closed: "group_mm5eabbk"
+    newInboundCalls: SBA_BOARD.groups.newLeads,
+    formLinkSent: SBA_BOARD.groups.newLeads,
+    existingApplicantFollowUp: SBA_BOARD.groups.newLeads,
+    transferredToOutbound: SBA_BOARD.groups.newLeads,
+    closed: SBA_BOARD.groups.newLeads
   }),
-  columns: Object.freeze({
-    name: "name",
-    callerType: "color_mm5es680",
-    priority: "color_mm5erfwt",
-    assignedTo: "multiple_person_mm5exyzj",
-    nextFollowUp: "date_mm5ew2hf",
-    inboundStatus: "color_mm5eeeh",
-    leadSource: "dropdown_mm5ee9cs",
-    followUpNeeded: "color_mm5e49b8",
-    subitems: "subtasks_mm5et3dw",
-
-    firstName: "text_mm5fx7z9",
-    lastName: "text_mm5ffrc0",
-    city: "text_mm5qw2k2",
-    state: "text_mm5q3gq4",
-    estimatedHomePrice: "text_mm5qxf89",
-    purchaseTimeframe: "text_mm5q63c0",
-    jobHistory: "text_mm5q3dxr",
-    email: "email_mm5f7560",
-    phoneNumber: "phone_mm5fdqn5",
-    creditScore: "text_mm5j48bj",
-    annualIncome: String(
-      process.env.INBOUND_ANNUAL_INCOME_COLUMN_ID || ""
-    ).trim(),
-    taxReturnStatus: "text_mm5jx81q",
-    dateCalled: "date_mm5fcmqe",
-    summary: "text_mm5fsx2c",
-    callStatus: "dropdown_mm5fv4r9"
-  })
+  columns: SBA_BOARD.columns,
+  subitemColumns: SBA_BOARD.subitemColumns
 });
 const MONDAY_BOARD_ID = INBOUND_MONDAY.boards.inbound;
 const MONDAY_SUBITEM_BOARD_ID = INBOUND_MONDAY.boards.subitems;
@@ -867,12 +846,12 @@ if (missingEnvironment.length) {
 }
 
 const DOUG_CONFIG = Object.freeze({
-  agentVersion: "daisy-inbound-demo-1.0.0",
-  promptVersion: "daisy-inbound-dpa-v4.0",
-  toolVersion: "inbound-actions-v4.0",
-  knowledgeVersion: "dpa-general-v1",
-  routingVersion: "dpa-routing-v1",
-  mondayAdapterVersion: "monday-inbound-demo-v1",
+  agentVersion: "daisy-sba-inbound-1.0.0",
+  promptVersion: "daisy-inbound-sba-v1.0",
+  toolVersion: "sba-inbound-actions-v1.0",
+  knowledgeVersion: "sba-funding-general-v1",
+  routingVersion: "sba-routing-v1",
+  mondayAdapterVersion: "monday-sba-inbound-v1",
   voiceRules: {
     maximumResponseSeconds: 12,
     questionsPerTurn: 1,
@@ -1230,346 +1209,8 @@ function confirmedConsent(payload) {
   return ["confirmed", "granted", "approved", "yes"].includes(status);
 }
 
-const DAISY_INBOUND_TEST_SCRIPT = `
-DAISY INBOUND DPA CALL SCRIPT
 
-You are Daisy, the inbound AI receptionist for the DPA Help Center. Keep the call helpful, brief, conversational, and directed. Do not conduct the call as a rapid questionnaire. Use the approved responses below only when they directly answer the caller's question, and never read them as one long speech.
-
-KNOWN CALLER CONTEXT
-Known caller phone: {caller_phone}
-Known caller name: {caller_name}
-Lead source: {lead_source}
-
-CORE CONVERSATION RULE
-- Answer direct questions briefly, then continue immediately with the next necessary scripted sentence or question.
-- After every routine customer answer, continue directly to the next approved scripted sentence or question.
-- Do not thank, acknowledge, summarize, confirm receipt, narrate, or comment on a routine answer.
-- Do not describe what you are thinking, doing, recording, checking, preparing, or planning.
-- Do not announce conversational transitions or narrate your own next action. Simply perform the next action or ask the next approved question.
-- Never say "Thanks for that," "Got it," "Okay," "Perfect," "Understood," "Let me wrap this up," "Let me make a note of that," "Let me check," "Let me think about the next step," "Let me think about what we need to do next," "Here's what we should do next," "Now I'm going to ask," or any similar filler, narration, transition language, or internal-process commentary.
-- A brief empathetic response is allowed only when the caller shares something emotional, sensitive, or difficult. Routine factual answers do not require acknowledgment.
-- The exact approved greeting and closing are exceptions to the routine-answer rule.
-- Ask one relevant question.
-- Wait for the caller's completed answer.
-- Move the conversation forward.
-- Answer additional questions when asked.
-- Gather the next piece of information only when it fits naturally.
-- Ask only one question at a time.
-- Do not restart the greeting after an interruption. Answer a brief related question, then resume naturally.
-
-ADDITIVE CONVERSATION STRATEGY V2.0
-- Keep every existing business rule, guardrail, compliance rule, tool requirement, CRM action, callback rule, follow-up rule, and scheduling rule in this playbook.
-- This strategy changes how you navigate the conversation, not what the business process requires.
-- Optimize for trust, clarity, patience, and a positive customer experience.
-- Treat the caller's reason for calling as the first objective. Fully answer that concern before recommending a next step.
-- Do not interrupt a legitimate customer question to return to qualification questions or the readiness application.
-- For substantive questions, use this internal sequence: listen, understand, answer, confirm the answer helped when useful, and continue naturally.
-- Confirmation must be purposeful, not automatic. Do not confirm after routine factual answers, and do not use filler acknowledgments or narrated transitions.
-- Continue answering legitimate follow-up questions until the caller indicates the main concern is resolved.
-- Treat non-exact explanatory language as a flexible playbook so the call sounds natural. Preserve every sentence marked "say exactly," every required question, every compliance response, and every tool-triggering requirement without improvisation.
-- Sound warm, professional, patient, knowledgeable, encouraging, and helpful. Never sound rushed, robotic, overly excited, pushy, or salesy.
-
-INTENT ROUTING
-- Use the exact approved opening below.
-- After the caller first responds to the opening, collect the city and state where they would like to purchase before classifying intent or answering the caller's initial question.
-- After the city and state are saved, ask the routing question exactly once:
-"Excellent. To make sure we head in the right direction, tell me which best describes why you're calling today: you've already started the Readiness Assessment, you'd like to know how to get started, you'd like to know if you qualify or how much assistance may be available, or something else?"
-- Save the caller's selected classification with save_inbound_caller_context, then continue immediately to CONTACT COLLECTION before beginning the selected talk track.
-- Use the answer only to choose the relevant existing path. Do not read the routing choices after the caller has already stated a clear purpose. Do not postpone CONTACT COLLECTION until the end of the selected talk track.
-- Never ask the caller to restate or re-explain why they are calling after the opening response and routing selection. Continue with the selected talk track.
-
-READINESS-ASSESSMENT MENTION LIMIT
-- The Readiness Assessment is a logical next step, not the conversation itself.
-- Mention or recommend it no more than three times during the entire call. The approved closing counts as one mention.
-- Each non-closing mention must have a distinct purpose and different wording. Never repeat the same recommendation sentence.
-- First mention: only after the caller's original reason for calling has been fully answered.
-- Second mention: only after the caller's major questions have been answered, as context for the existing follow-up scheduling flow.
-- Final mention: use the approved closing. If the caller declines follow-up, the decline response may serve as the second mention and the closing remains the final mention.
-- When optional branch language below would repeat a prior recommendation or exceed the three-mention limit, omit the duplicate recommendation and continue with the next approved question or action.
-- After the first recommendation, answer every legitimate additional question without redirecting or pitching the assessment again.
-- Before the existing follow-up scheduling flow, ask:
-"Have I answered everything you were hoping to learn today?"
-- Use this as the near-end confirmation in ADDITIONAL QUESTIONS. Do not ask it in addition to another equivalent question.
-- Attempt the existing follow-up scheduling flow once. Do not invent or promise a new consultation type, and do not alter the existing scheduling tool or callback behavior.
-- If the caller declines follow-up, do not pressure, argue, guilt, or make another scheduling attempt.
-
-SUCCESS STANDARD
-- The caller feels understood and receives a complete answer to the reason for calling.
-- Daisy earns trust and guides the conversation naturally.
-- The caller understands the appropriate next step without repetitive selling.
-- Success includes a caller who begins the Readiness Assessment, accepts the existing follow-up, or ends with a positive impression and a clear path forward.
-
-OPENING
-Say exactly:
-"Thank you for calling the DPA Help Center. This is Daisy speaking. How can I help you?"
-
-Listen to the caller's complete response. Then ask exactly:
-"Sure, to help me better serve you, what city and state would you like to purchase a home in?"
-
-Save the caller's exact meaningful answer as purchase_area. Do not infer, guess, or substitute a location. After purchase_area is saved, ask the exact routing question in INTENT ROUTING.
-
-After the caller selects a routing option, complete CONTACT COLLECTION and EARLY EMAIL COLLECTION first. Then address their question or concern using the relevant talk track. Appropriate brief responses include:
-"Some down payment assistance programs may help with the down payment and possibly some closing costs."
-"Eligibility depends on the specific program and your overall homebuyer-readiness profile."
-
-CONTACT COLLECTION
-Then ask exactly:
-"Before we continue, may I have your first and last name?"
-
-Parse and save the confirmed answer as first_name and last_name with save_inbound_caller_context. Do not ask separate first-name and last-name questions. Respond:
-Continue directly to phone-number confirmation without a standalone acknowledgment.
-
-EARLY EMAIL COLLECTION
-Use the inbound caller ID as phone_number. Ask exactly:
-"I have the phone number you're calling from ending in [Last Four Digits]. Is that correct?"
-
-Wait for the caller's response. If the caller confirms the number, say exactly:
-"Perfect, and what's a good email for you before we dive into things?"
-
-If the caller says the number is incorrect, ask for the correct phone number, save it, and then say the same exact email question.
-
-Save email and repeat it back once for confirmation. Do not ask for the email again later in the call unless the caller corrects it or specifically says a different email was used for an existing application. Then immediately return to the caller's question or move the call forward.
-
-HOW TO GET STARTED
-If the caller selects that they would like to know how to get started, say:
-"The best place to begin is dpahelpcenter.com."
-
-"The readiness application takes about two or three minutes, there is no credit check, and it gives the team the information needed to help you move forward."
-
-Then ask:
-"Have you already started looking at homes, [First Name]?"
-
-After the caller answers, ask:
-"[First Name], would you like to know what most programs are looking for?"
-
-If the caller says yes, continue directly to BASIC READINESS CONVERSATION and ask every approved qualification question one at a time.
-
-GENERAL DPA RESPONSE AMMUNITION
-Answer only the caller's actual question. Do not recite every approved response.
-
-IF ASKED HOW MUCH ASSISTANCE IS AVAILABLE
-You may say:
-"Some down payment assistance programs may offer up to $100,000 in assistance. The amount available depends on the program and the homebuyer's eligibility."
-
-"Some programs have income limits, while others may not."
-
-"There are county, city, state, lender, government, nonprofit, and grant programs. Because the requirements vary, it is difficult to know which program is the best fit without first assessing your homebuyer-readiness profile."
-
-Then move forward with:
-"Have you already started looking at homes, [First Name]?"
-
-Use the caller's answer to continue naturally.
-
-IF ASKED HOW DOWN PAYMENT ASSISTANCE WORKS
-Say:
-"Please keep in mind that this is only a general example. Specific programs and assistance amounts depend on your eligibility, which will be reviewed as you move through the process."
-
-"Let's say someone qualifies for assistance equal to five percent of the home's purchase price."
-
-"Five percent of a $400,000 home would be $20,000. Depending on the program, that money may be used toward the down payment and possibly some closing costs."
-
-"Again, that is only a general example."
-
-Then ask:
-"About how much are the homes you're considering?"
-
-Save estimated_home_price and calculate exactly five percent with save_inbound_caller_context. Respond:
-"So, using that same example, five percent of a home priced around $[Home Price] would be approximately $[Calculated Amount]. That does not mean that is the exact amount you would receive, but it gives you a general idea of how some programs work."
-
-Then ask:
-"How soon would you like to become a homeowner?"
-
-Save the exact answer as homebuying_timeline and include it in call_summary. Continue directly to the next relevant scripted question.
-
-IF ASKED WHETHER THEY QUALIFY
-Say:
-"Eligibility depends on the specific program and your overall homebuyer-readiness profile."
-
-"Programs may consider factors such as location, credit, income, employment history, tax-filing history, and the home's purchase price."
-
-Then ask:
-"Would you like me to go over a few of the basic details that many programs may look for?"
-
-BASIC READINESS CONVERSATION
-If the caller says yes, say:
-"Keep in mind these are only general guidelines, and specific program requirements may vary."
-
-"Many programs may look for a credit score around 640 or higher, approximately $70,000 or more in annual household income, two years of filed federal tax returns, and two years of employment history."
-
-"The employment history does not have to be with the same employer, but you generally need to have been employed during the past two years."
-
-Complete every approved readiness question even when an earlier answer falls below a general guideline. Do not react negatively to an individual answer or give a readiness response before all approved readiness questions are complete.
-
-Then ask one question:
-"About what would you say your credit score is?"
-
-Save estimated_credit_score without approving, rejecting, thanking, acknowledging, or commenting on the answer.
-
-Then ask:
-"And approximately what is your annual household income before taxes?"
-
-Save annual_household_income, then continue directly.
-
-Then ask:
-"Have you filed your federal tax returns for the last two years?"
-
-Save two_year_tax_filing_status.
-
-Then ask:
-"Have you been employed during the past two years?"
-
-Save two_year_employment_history.
-
-READINESS RESPONSE
-Give the readiness response only after the caller has answered all approved readiness questions. Never describe the caller as unqualified, denied, or ineligible, and never present the general guidelines as a formal eligibility decision.
-
-If the caller appears to meet the general guidelines, say:
-"Based on the general information you shared, you sound like a strong candidate to continue through the readiness process."
-
-Do not say the caller is approved or guaranteed to qualify. Then say:
-"My recommendation is to take two or three minutes and complete the readiness application at dpahelpcenter.com."
-
-"There is no credit check, and it will help identify your current readiness and start the process of connecting you with a DPA Program Specialist who can help pinpoint the programs that may be right for you."
-
-If the caller falls below one or more general guidelines, say:
-"Based on what you've shared, it sounds like there may be a few areas to prepare before moving forward, and I want to encourage you to continue with the readiness process."
-
-Then continue directly with the existing application guidance:
-"The DPA Help Center may sometimes have creative ways to help first-time homebuyers improve their readiness or identify possible next steps, regardless of where they are today."
-
-"My recommendation is still to complete the readiness application at dpahelpcenter.com."
-
-"There is no credit check, and the assessment will help the team understand your situation and determine the most appropriate next step."
-
-WEBSITE AND EXISTING APPLICATION
-Ask:
-"Have you had a chance to visit dpahelpcenter.com?"
-
-If no, say:
-"That is the best place to begin."
-
-"The readiness application takes about two or three minutes, there is no credit check, and it gives the team the information needed to help you move forward."
-
-Then continue the conversation.
-
-If yes, ask:
-"Great. Were you able to start or complete the readiness application?"
-
-If no, say:
-"Complete it next because that is where the readiness-review process begins."
-
-If yes, say:
-Search existing records silently with lookup_existing_outbound_applicant using the inbound phone number, confirmed name, and saved email. Do not narrate the search. Only ask the following question if the caller says a different email was used for the application:
-"What email address did you use on the application?"
-
-Save email and repeat it back for confirmation. If a record is found, provide only the approved customer-facing status returned by the lookup. Never invent a record or status.
-
-If no record is found, say:
-"I wasn't able to locate a submitted application using the information we confirmed."
-
-"It may not have been fully submitted, so I recommend returning to dpahelpcenter.com and completing the readiness application again."
-
-EMAIL COLLECTION WHEN NO APPLICATION SEARCH IS NEEDED
-If no valid email was captured during EARLY EMAIL COLLECTION, ask:
-"What is the best email address for our team to have on file?"
-
-Save email and repeat it back for confirmation. If a valid email is already saved, do not ask for it again. Do not promise to send a text link or email unless that capability actually exists.
-
-INTEREST-RATE GUARDRAIL
-Never discuss interest rates in any shape, form, or fashion. Do not discuss rates, APR, rate locks, points, fixed rates, adjustable rates, payment estimates involving rates, or whether rates may rise or fall.
-
-If asked, say exactly:
-"That will be covered by your DPA Program Specialist when you speak with them. Interest rates and loan details depend on the individual homebuyer's situation, so I'm not permitted to discuss or estimate them."
-
-Then redirect:
-"What I can help you with is getting started through the readiness application at dpahelpcenter.com."
-
-If the caller asks again, say exactly:
-"I understand why that is important. Your DPA Program Specialist will be the correct person to discuss interest rates and loan-specific information with you."
-
-Do not provide any additional rate information.
-
-ADDITIONAL QUESTIONS
-Near the end ask:
-"Have I answered everything you were hoping to learn today?"
-
-If the caller has another legitimate question, answer it completely using the approved response ammunition. Do not redirect, repeat a readiness recommendation, or restart the full qualification sequence. Confirm the substantive answer helped only when useful, then continue naturally. Once the caller confirms the major questions are answered, continue to the existing follow-up scheduling flow.
-
-REQUIRED PRE-CLOSING READINESS CHECK
-Before moving to FOLLOW-UP SCHEDULING, check whether estimated_credit_score, annual_household_income, two_year_tax_filing_status, and two_year_employment_history have already been collected during this call.
-
-If all four values are already saved, do not repeat any readiness explanation or question. Continue directly to FOLLOW-UP SCHEDULING.
-
-If one or more values are missing, say:
-"[First Name], while I have you on the line, before I let you go, let me share a few quick details about what some programs may be looking for."
-
-Then say:
-"Keep in mind these are only general guidelines, and specific program requirements may vary."
-
-"Many programs may look for a credit score around 640 or higher, approximately $70,000 or more in annual household income, two years of filed federal tax returns, and two years of employment history."
-
-"The employment history does not have to be with the same employer, but you generally need to have been employed during the past two years."
-
-Ask only the questions whose saved values are still missing, one at a time:
-"About what would you say your credit score is?"
-"And approximately what is your annual household income before taxes?"
-"Have you filed your federal tax returns for the last two years?"
-"Have you been employed during the past two years?"
-
-Save each answer with save_inbound_caller_context before asking the next question. Never repeat a qualification question whose value is already saved. After all four values are collected, give the appropriate existing READINESS RESPONSE, then continue directly to FOLLOW-UP SCHEDULING.
-
-FOLLOW-UP SCHEDULING
-Once the caller confirms there are no more questions, ask:
-"When would be a good time for me to check back with you regarding starting or completing the readiness application on our website?"
-
-Collect the date and time. If the answer is vague, ask:
-"What specific time would work best for you?"
-
-Use create_inbound_follow_up with follow_up_reason readiness_application. After it succeeds, save the summary and use complete_call. Do not give a separate generic confirmation. The server will speak the exact saved callback date, time, and timezone immediately before the approved closing and physical hangup.
-
-If the caller does not want a follow-up, say:
-"You can begin whenever you're ready by visiting dpahelpcenter.com."
-
-Use create_inbound_follow_up with follow_up_declined true.
-
-CALL SUMMARY
-Before complete_call, save a concise factual call_summary containing only available information, including the caller's name, primary reason, estimated home price, homebuying timeline, estimated credit score, annual household income, tax-filing status, employment history, website visit, application status, email when collected, follow-up schedule or decline, and key questions answered. Save an appropriate call_outcome. Do not fill missing fields with assumptions.
-
-CLOSING
-After the follow-up is scheduled or declined and the summary is saved, use the existing complete_call flow. The approved closing is:
-"Thank you for calling the DPA Help Center, [First Name]."
-"You're one step closer to becoming a homeowner in [Saved City], [Saved State]."
-"And remember, your next step is to complete the readiness application at dpahelpcenter.com."
-"Have a wonderful day."
-
-Do not add another closing.
-
-CORE GUARDRAILS
-Daisy must never:
-- Promise approval.
-- Guarantee qualification.
-- Guarantee a specific assistance amount.
-- State that the general guidelines apply to every program.
-- Discuss interest rates.
-- Quote mortgage payments.
-- Recommend a lender or loan product.
-- Ask for a Social Security number.
-- Ask for banking or card information.
-- Invent a CRM record or application status.
-- Promise to text a link.
-- Over-question the caller.
-- Ask multiple questions in one turn.
-- Add filler, narration, transition language, or internal-process commentary.
-- Say "let me think this through," "let me think about what we need to do next," "let me think," or narrate a calculation before responding.
-
-Daisy should answer direct questions briefly, then continue immediately with the next necessary scripted sentence or question.
-`.trim();
-
-const SUPPORTED_INBOUND_INTENTS = Object.freeze([
-  "NEW_DPA_INQUIRY",
-  "EXISTING_APPLICATION_FOLLOWUP",
-  "OTHER"
-]);
+const SUPPORTED_INBOUND_INTENTS = SBA_INTENTS;
 
 function savedInboundIntent(call) {
   return [
@@ -1600,73 +1241,40 @@ function inboundIntentStateInstruction(call) {
   ].join("\n");
 }
 
-function inboundPurchaseLocationStateInstruction(call) {
-  const purchaseLocation = inboundPurchaseLocationLabel(call);
-  if (!purchaseLocation) {
-    return [
-      "SESSION PURCHASE LOCATION STATE",
-      "The purchase city and state have not yet been saved.",
-      "Ask the existing city-and-state question once at its approved point in the opening."
-    ].join("\n");
-  }
-  return [
-    "SESSION PURCHASE LOCATION STATE",
-    `The saved purchase location is ${purchaseLocation}. Location collection is complete.`,
-    "Do not ask for the purchase city or state again for any reason. Continue from the current conversation stage."
-  ].join("\n");
-}
-
-function inboundAssistanceMaximumStateInstruction(call) {
-  const alreadyMentioned =
-    call?.result?.assistance_maximum_mentioned === true;
-  return [
-    "SESSION ASSISTANCE-MAXIMUM STATE",
-    alreadyMentioned
-      ? "The approved statement that some programs may offer up to $100,000 has already been said during this call."
-      : "The approved statement that some programs may offer up to $100,000 has not been said during this call.",
-    alreadyMentioned
-      ? "Do not repeat that amount or statement again. Continue with the current talk track."
-      : "Use that approved statement no more than once, and only when it directly answers the caller's question."
-  ].join("\n");
-}
-
-function inboundMissingQualificationFields(call) {
+function inboundSbaProfileEntries(call) {
   const result = call?.result || {};
   return [
-    [
-      "estimated_credit_score",
-      result.estimated_credit_score || result.credit_score
-    ],
-    ["annual_household_income", result.annual_household_income],
-    [
-      "two_year_tax_filing_status",
-      result.two_year_tax_filing_status || result.tax_return_status
-    ],
-    [
-      "two_year_employment_history",
-      result.two_year_employment_history || result.job_history
-    ]
-  ]
-    .filter(([, value]) => !cleanInboundContactValue(value, 500))
-    .map(([field]) => field);
+    ["name", [result.first_name, result.last_name].filter(Boolean).join(" ") || result.full_name],
+    ["email", result.email],
+    ["business entity", result.business_entity_type],
+    ["entity status", result.entity_status],
+    ["estimated credit", result.estimated_credit_score || result.credit_score],
+    ["gross monthly revenue", result.gross_monthly_revenue],
+    ["tax information", result.taxes || result.tax_returns_status || result.tax_return_status],
+    ["city", result.city],
+    ["ZIP", result.zip],
+    ["lead ID", result.lead_id]
+  ].filter(([, value]) => cleanInboundContactValue(value, 500));
 }
 
-function inboundQualificationStateInstruction(call) {
-  const missing = inboundMissingQualificationFields(call);
-  if (!missing.length) {
-    return [
-      "SESSION QUALIFICATION STATE",
-      "Credit score, annual household income, tax-return history, and employment history are all saved.",
-      "Do not repeat any qualification question. Continue from the current conversation stage."
-    ].join("\n");
-  }
+function inboundSbaLeadStateInstruction(call) {
+  const result = call?.result || {};
+  const matchStatus = cleanText(result.sba_lead_match_status, 50) || "not_checked";
+  const profileEntries = inboundSbaProfileEntries(call);
   return [
-    "SESSION QUALIFICATION STATE",
-    `The following required qualification answers are still missing: ${missing.join(", ")}.`,
-    "Before follow-up scheduling or closing, complete the existing REQUIRED PRE-CLOSING READINESS CHECK.",
-    "Ask only the missing approved qualification questions, one at a time, in their existing script order. Do not skip this requirement."
+    "SESSION SBA LEAD STATE",
+    `Phone lookup status: ${matchStatus}.`,
+    profileEntries.length
+      ? `Existing profile fields: ${profileEntries.map(([label, value]) => `${label}: ${value}`).join("; ")}.`
+      : "No existing SBA intake values are loaded.",
+    matchStatus === "matched"
+      ? "Use these values naturally, confirm the important profile together, and do not recollect confirmed fields."
+      : matchStatus === "multiple_matches"
+        ? "Multiple phone matches exist. Ask for one identifying detail at a time and use lookup_existing_sba_lead before choosing a record."
+        : "Treat the caller as a new funding inquiry and collect only the information needed for the caller's purpose and next step."
   ].join("\n");
 }
+
 
 function buildDaisyInboundInstructions(call) {
   const payload = call?.payload || {};
@@ -1676,15 +1284,24 @@ function buildDaisyInboundInstructions(call) {
   const callerName = inboundCallerFirstName(call) || "not provided";
   const leadSource = cleanText(payload.lead_source, 160) || "not provided";
 
-  const script = DAISY_INBOUND_TEST_SCRIPT
+  const profileEntries = inboundSbaProfileEntries(call);
+  const script = SBA_INBOUND_SCRIPT
     .replaceAll("{caller_phone}", callerPhone)
     .replaceAll("{caller_name}", callerName)
-    .replaceAll("{lead_source}", leadSource);
+    .replaceAll("{lead_source}", leadSource)
+    .replaceAll(
+      "{lead_match_status}",
+      cleanText(call?.result?.sba_lead_match_status, 50) || "not_checked"
+    )
+    .replaceAll(
+      "{existing_profile}",
+      profileEntries.length
+        ? profileEntries.map(([label, value]) => `${label}: ${value}`).join("; ")
+        : "none loaded"
+    );
   return [
     inboundIntentStateInstruction(call),
-    inboundPurchaseLocationStateInstruction(call),
-    inboundAssistanceMaximumStateInstruction(call),
-    inboundQualificationStateInstruction(call),
+    inboundSbaLeadStateInstruction(call),
     script
   ].join("\n\n");
 }
@@ -2337,11 +1954,11 @@ const DOUG_TOOLS = [
 const INBOUND_TOOLS = Object.freeze([
   inlineTool(
     "save_inbound_caller_context",
-    "Save the inbound caller classification and confirmed contact details.",
+    "Save confirmed SBA funding-profile details and call progress without ending the call.",
     {
       intent: {
         type: "string",
-        enum: ["NEW_DPA_INQUIRY", "EXISTING_APPLICATION_FOLLOWUP", "OTHER"]
+        enum: [...SBA_INTENTS]
       },
       intent_change_confirmed: { type: ["boolean", "null"] },
       full_name: { type: ["string", "null"] },
@@ -2350,28 +1967,39 @@ const INBOUND_TOOLS = Object.freeze([
       phone_number: { type: ["string", "null"] },
       email: { type: ["string", "null"] },
       lead_source: { type: ["string", "null"] },
-      estimated_home_price: { type: ["number", "string", "null"] },
-      estimated_five_percent_assistance: { type: ["number", "null"] },
-      homebuying_timeline: { type: ["string", "null"] },
+      business_name: { type: ["string", "null"] },
+      business_entity_type: { type: ["string", "null"] },
+      entity_status: { type: ["string", "null"] },
+      time_in_business: { type: ["string", "null"] },
+      industry: { type: ["string", "null"] },
+      city: { type: ["string", "null"] },
+      state: { type: ["string", "null"] },
+      zip: { type: ["string", "number", "null"] },
+      lead_id: { type: ["string", "null"] },
+      funding_use: { type: ["string", "null"] },
+      funding_amount: { type: ["number", "string", "null"] },
+      funding_timeline: { type: ["string", "null"] },
       estimated_credit_score: { type: ["string", "number", "null"] },
-      annual_household_income: { type: ["string", "number", "null"] },
-      two_year_employment_history: { type: ["string", "null"] },
-      two_year_tax_filing_status: {
-        type: ["string", "null"],
-        enum: ["yes", "one_year", "not_filed", "not_sure", null]
-      },
-      website_visited: { type: ["boolean", "null"] },
-      readiness_application_started: { type: ["boolean", "null"] },
-      readiness_application_completed: { type: ["boolean", "null"] },
-      application_status: { type: ["string", "null"] },
+      gross_monthly_revenue: { type: ["string", "number", "null"] },
+      monthly_business_expenses: { type: ["string", "number", "null"] },
+      existing_business_financing: { type: ["string", "null"] },
+      tax_returns_status: { type: ["string", "null"] },
+      tax_years_available: { type: ["string", "number", "null"] },
+      bank_statements_available: { type: ["boolean", "null"] },
+      financial_statements_available: { type: ["boolean", "null"] },
+      website_funding_preview_completed: { type: ["boolean", "null"] },
+      existing_profile_confirmed: { type: ["boolean", "null"] },
+      preliminary_readiness: { type: ["string", "null"] },
+      missing_items: { type: ["array", "null"], items: { type: "string" } },
+      next_action: { type: ["string", "null"] },
       call_summary: { type: ["string", "null"] },
       call_outcome: { type: ["string", "null"] }
     },
     []
   ),
   inlineTool(
-    "lookup_existing_outbound_applicant",
-    "Look up an existing outbound applicant without fabricating a result.",
+    "lookup_existing_sba_lead",
+    "Resolve an existing SBA Monday lead by caller phone plus confirmed name or email without fabricating a match.",
     {
       email: { type: ["string", "null"] },
       first_name: { type: ["string", "null"] },
@@ -2381,20 +2009,20 @@ const INBOUND_TOOLS = Object.freeze([
   ),
   inlineTool(
     "create_inbound_follow_up",
-    "Create or decline a readiness-application follow-up task.",
+    "Create or decline a confirmed SBA funding-review follow-up task.",
     {
       follow_up_date: { type: ["string", "null"], description: "Exact local date in YYYY-MM-DD format." },
       follow_up_time: { type: ["string", "null"], description: "Exact local time including hour and minute." },
       follow_up_timezone: { type: ["string", "null"] },
-      follow_up_reason: { type: "string", enum: ["readiness_application"] },
+      follow_up_reason: { type: "string", enum: ["funding_review"] },
       follow_up_declined: { type: "boolean" },
       call_summary: { type: ["string", "null"] }
     },
     ["follow_up_reason", "follow_up_declined"]
   ),
   inlineTool(
-    "transfer_inbound_to_outbound",
-    "Route the CRM record to the existing outbound team without placing an outbound call.",
+    "create_funding_specialist_handoff",
+    "Route the SBA funding profile to a Funding Specialist without placing an outbound call.",
     {
       reason: { type: "string" },
       priority: { type: "string", enum: ["normal", "high", "urgent"] }
@@ -3015,6 +2643,19 @@ function pendingQuestionType(value) {
     return "confirmation";
   }
   if (/creditscore|score.*credit/.test(text)) return "credit_score";
+  if (/grossmonthlyrevenue|monthlyrevenue|revenue.*month/.test(text)) {
+    return "gross_monthly_revenue";
+  }
+  if (/entitytype|business.*(?:llc|corporation|entity)|how.*business.*structured/.test(text)) {
+    return "business_entity_type";
+  }
+  if (/howlong.*business|timeinbusiness|business.*operating/.test(text)) {
+    return "time_in_business";
+  }
+  if (/howmuchfunding|fundingamount|amount.*funding/.test(text)) {
+    return "funding_amount";
+  }
+  if (/use.*funding|funding.*(?:for|purpose)/.test(text)) return "funding_use";
   if (
     /howmuch.*homes?.*(?:considering|looking)|homes?.*(?:considering|looking).*howmuch/.test(
       text
@@ -3040,7 +2681,7 @@ function pendingQuestionType(value) {
   if (/employed.*(?:past|last).*twoyears|employmenthistory|workhistory/.test(text)) {
     return "employment_history";
   }
-  if (/timeframe|timeline|purchase|buy|income|credit|employment|tax/.test(text)) {
+  if (/timeframe|timeline|revenue|cashflow|credit|business|funding|tax/.test(text)) {
     return "qualification";
   }
   return "general_question";
@@ -3751,7 +3392,6 @@ function inboundPurchaseLocationLabel(call) {
 
 function buildInboundFinalClosing(call) {
   const firstName = inboundCallerFirstName(call);
-  const purchaseLocation = inboundPurchaseLocationLabel(call);
   const followUpConfirmation = formatInboundFollowUpConfirmation(
     call?.result?.inbound_follow_up
   );
@@ -3759,12 +3399,70 @@ function buildInboundFinalClosing(call) {
     ? `${followUpConfirmation} `
     : ""
   }${firstName
-    ? `Thank you for calling the DPA Help Center, ${firstName}.`
-    : "Thank you for calling the DPA Help Center."
-  } ${purchaseLocation
-    ? `You're one step closer to becoming a homeowner in ${purchaseLocation}.`
-    : "You're one step closer to becoming a homeowner."
-  } And remember, your next step is to complete the readiness application at dpahelpcenter.com. Have a wonderful day.`;
+    ? `Thank you for calling the SBA Help Center, ${firstName}.`
+    : "Thank you for calling the SBA Help Center."
+  } Your funding profile and next step have been recorded. Have a wonderful day.`;
+}
+
+function normalizeSbaCreditRange(value) {
+  const cleaned = cleanText(value, 100);
+  if (!cleaned) return "";
+  const normalized = normalizeMondayKey(cleaned);
+  if (/notsure|unknown/.test(normalized)) return "Not sure";
+  const scores = cleaned.match(/\b\d{3}\b/g)?.map(Number) || [];
+  if (/below\s*580|under\s*580/i.test(cleaned)) return "Below 580";
+  if (scores.length >= 2) {
+    const low = Math.min(...scores);
+    const high = Math.max(...scores);
+    if (low <= 580 && high <= 619) return "580 - 619";
+    if (low <= 620 && high <= 639) return "620 - 639";
+    if (low <= 640 && high <= 679) return "640 - 679";
+  }
+  const score = scores[0];
+  if (!Number.isFinite(score)) {
+    if (/680plus|680\+/.test(normalized)) return "680+";
+    return "";
+  }
+  if (score < 580) return "Below 580";
+  if (score <= 619) return "580 - 619";
+  if (score <= 639) return "620 - 639";
+  if (score <= 679) return "640 - 679";
+  return score <= 850 ? "680+" : "";
+}
+
+function normalizeSbaRevenueRange(value) {
+  const cleaned = cleanText(value, 120);
+  if (!cleaned) return "";
+  const amounts = (cleaned.match(/\d[\d,]*/g) || []).map((amount) =>
+    Number(amount.replace(/,/g, ""))
+  );
+  if (amounts.length >= 2) {
+    const [low, high] = amounts;
+    if (low === 0 && high === 5000) return "$0 - $5,000";
+    if (low === 5000 && high === 25000) return "$5,000 - $25,000";
+    if (low === 25000 && high === 150000) return "$25,000 - $150,000";
+  }
+  if (amounts[0] === 150000 && /(?:\+|plus|or more)/i.test(cleaned)) {
+    return "$150,000+";
+  }
+  const amount = Number(normalizeInboundAnnualIncome(cleaned));
+  if (!Number.isFinite(amount)) return "";
+  if (amount <= 5000) return "$0 - $5,000";
+  if (amount <= 25000) return "$5,000 - $25,000";
+  if (amount <= 150000) return "$25,000 - $150,000";
+  return "$150,000+";
+}
+
+function normalizeSbaEntityType(value) {
+  const cleaned = cleanText(value, 120);
+  if (!cleaned) return "";
+  const normalized = normalizeMondayKey(cleaned);
+  if (normalized === "llc" || normalized.includes("limitedliability")) return "LLC";
+  if (normalized === "scorp" || normalized.includes("scorporation")) return "S-corp";
+  if (normalized === "ccorp" || normalized.includes("ccorporation")) return "C-corp";
+  if (normalized.includes("trust")) return "Trust";
+  if (/notsetup|startup|notformed|none/.test(normalized)) return "Not Set Up Yet";
+  return "";
 }
 
 function normalizeInboundEmail(value) {
@@ -3960,36 +3658,66 @@ function resolveInboundMondayLabel(column, desiredLabel) {
   ) || null;
 }
 
-async function inboundMondayValues(data = {}, diagnostic = null) {
-  const metadata = await loadInboundMondayMetadata(false, diagnostic);
+function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
   const values = {};
-  const statusFields = [
-    [INBOUND_MONDAY.columns.priority, data.priority],
-    [INBOUND_MONDAY.columns.inboundStatus, data.inbound_status],
-    [INBOUND_MONDAY.columns.followUpNeeded, data.follow_up_needed]
+  const skip = typeof onSkippedColumn === "function"
+    ? onSkippedColumn
+    : () => undefined;
+  const textFields = [
+    ["first_name", INBOUND_MONDAY.columns.firstName],
+    ["last_name", INBOUND_MONDAY.columns.lastName],
+    ["taxes", INBOUND_MONDAY.columns.taxes],
+    ["city", INBOUND_MONDAY.columns.city],
+    ["lead_id", INBOUND_MONDAY.columns.leadId]
   ];
-  for (const [columnId, desiredLabel] of statusFields) {
+  for (const [field, columnId] of textFields) {
+    const value = cleanInboundContactValue(data[field], 500);
+    if (value) values[columnId] = value;
+  }
+  const email = normalizeInboundEmail(data.email);
+  if (email) values[INBOUND_MONDAY.columns.email] = { email, text: email };
+  const zip = cleanText(data.zip, 20)?.replace(/[^0-9]/g, "") || "";
+  if (zip) values[INBOUND_MONDAY.columns.zip] = zip;
+
+  const dropdownFields = [
+    ["business_entity_type", INBOUND_MONDAY.columns.businessEntityType, "Business Entity Type", normalizeSbaEntityType(data.business_entity_type)],
+    ["estimated_credit_score", INBOUND_MONDAY.columns.estimatedCreditScore, "Estimated Credit Score", normalizeSbaCreditRange(data.estimated_credit_score || data.credit_score)],
+    ["gross_monthly_revenue", INBOUND_MONDAY.columns.grossMonthlyRevenue, "Gross Monthly Revenue", normalizeSbaRevenueRange(data.gross_monthly_revenue)]
+  ];
+  for (const [field, columnId, columnTitle, desiredLabel] of dropdownFields) {
+    if (!desiredLabel) continue;
+    const column = inboundMondayColumn(metadata, columnId) ||
+      inboundMondayColumnByTitle(metadata, [columnTitle]);
+    const label = resolveInboundMondayLabel(column, desiredLabel);
+    if (label && column?.id) values[column.id] = { labels: [label] };
+    else skip({ field, columnId, desiredValue: desiredLabel, reason: "dropdown_label_not_found" });
+  }
+
+  const statusFields = [
+    ["entity_status", INBOUND_MONDAY.columns.entityStatus, data.entity_status],
+    ["tax_status", INBOUND_MONDAY.columns.taxStatus, data.tax_status],
+    ["credit_status", INBOUND_MONDAY.columns.creditStatus, data.credit_status],
+    ["income_status", INBOUND_MONDAY.columns.incomeStatus, data.income_status]
+  ];
+  for (const [field, columnId, desiredLabel] of statusFields) {
     if (!desiredLabel) continue;
     const column = inboundMondayColumn(metadata, columnId);
     const label = resolveInboundMondayLabel(column, desiredLabel);
     if (label) values[columnId] = { label };
-    else inboundLog("[MONDAY]", "label_not_found", { column_id: columnId, desired_label: desiredLabel });
+    else skip({ field, columnId, desiredValue: desiredLabel, reason: "status_label_not_found" });
   }
-  if (data.lead_source) {
-    const column = inboundMondayColumn(metadata, INBOUND_MONDAY.columns.leadSource);
-    const label = resolveInboundMondayLabel(column, data.lead_source);
-    if (label) values[INBOUND_MONDAY.columns.leadSource] = { labels: [label] };
-  }
-  if (data.call_status) {
-    const column = inboundMondayColumn(metadata, INBOUND_MONDAY.columns.callStatus);
-    const label = resolveInboundMondayLabel(column, data.call_status);
-    if (label) values[INBOUND_MONDAY.columns.callStatus] = { labels: [label] };
-  }
-  if (data.date_called) {
-    const dateCalled = new Date(data.date_called);
-    if (!Number.isNaN(dateCalled.getTime())) {
-      values[INBOUND_MONDAY.columns.dateCalled] = {
-        date: dateCalled.toISOString().slice(0, 10)
+  return values;
+}
+
+async function inboundMondayValues(data = {}, diagnostic = null) {
+  const metadata = await loadInboundMondayMetadata(false, diagnostic);
+  const values = {};
+  const updatedAt = data.updated_date || data.date_called;
+  if (updatedAt) {
+    const updatedDate = new Date(updatedAt);
+    if (!Number.isNaN(updatedDate.getTime())) {
+      values[INBOUND_MONDAY.columns.updatedDate] = {
+        date: updatedDate.toISOString().slice(0, 10)
       };
     }
   }
@@ -3999,12 +3727,50 @@ async function inboundMondayValues(data = {}, diagnostic = null) {
       countryShortName: "US"
     };
   }
-  return values;
+  return {
+    ...values,
+    ...buildSbaMondayUpdateValues({ data, metadata })
+  };
 }
 
-async function findInboundCallerByPhone(phone) {
+function inboundMondayItemValue(item, columnId) {
+  return item?.column_values?.find((column) => column.id === columnId)?.text || "";
+}
+
+function sbaProfileFromMondayItem(item) {
+  if (!item?.id) return null;
+  const firstName = cleanInboundContactValue(
+    inboundMondayItemValue(item, INBOUND_MONDAY.columns.firstName),
+    100
+  );
+  const lastName = cleanInboundContactValue(
+    inboundMondayItemValue(item, INBOUND_MONDAY.columns.lastName),
+    100
+  );
+  return {
+    monday_item_id: String(item.id),
+    full_name: [firstName, lastName].filter(Boolean).join(" ") || cleanText(item.name, 160),
+    first_name: firstName,
+    last_name: lastName,
+    email: normalizeInboundEmail(inboundMondayItemValue(item, INBOUND_MONDAY.columns.email)),
+    phone: normalizePhone(inboundMondayItemValue(item, INBOUND_MONDAY.columns.phoneNumber)),
+    business_entity_type: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.businessEntityType), 120),
+    entity_status: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.entityStatus), 100),
+    taxes: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.taxes), 500),
+    tax_status: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.taxStatus), 100),
+    estimated_credit_score: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.estimatedCreditScore), 100),
+    credit_status: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.creditStatus), 100),
+    gross_monthly_revenue: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.grossMonthlyRevenue), 120),
+    income_status: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.incomeStatus), 100),
+    city: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.city), 160),
+    zip: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.zip), 20),
+    lead_id: cleanText(inboundMondayItemValue(item, INBOUND_MONDAY.columns.leadId), 160)
+  };
+}
+
+async function findInboundCallersByPhone(phone) {
   const normalized = normalizePhone(phone);
-  if (!normalized || !INBOUND_MONDAY_CONNECTED) return null;
+  if (!normalized || !INBOUND_MONDAY_CONNECTED) return [];
   const phoneColumnId = INBOUND_MONDAY.columns.phoneNumber;
   const firstPage = await mondayGraphql(
     `query FindInboundCaller($boardIds: [ID!]!) {
@@ -4018,14 +3784,14 @@ async function findInboundCallerByPhone(phone) {
     { boardIds: [MONDAY_BOARD_ID] }
   );
   let page = firstPage.boards?.[0]?.items_page || {};
+  const matches = [];
   for (let pageNumber = 0; pageNumber < 20; pageNumber += 1) {
-    const match = (page.items || []).find((item) => {
+    matches.push(...(page.items || []).filter((item) => {
       const value = item.column_values?.find(
         (column) => column.id === phoneColumnId
       );
       return normalizePhone(value?.text) === normalized;
-    });
-    if (match) return match;
+    }));
     const cursor = cleanText(page.cursor, 1000);
     if (!cursor) break;
     const nextPage = await mondayGraphql(
@@ -4039,7 +3805,46 @@ async function findInboundCallerByPhone(phone) {
     );
     page = nextPage.next_items_page || {};
   }
-  return null;
+  return matches;
+}
+
+async function lookupExistingSbaLead(call, identifiers = {}) {
+  const matches = await findInboundCallersByPhone(call?.phone);
+  const email = normalizeInboundEmail(identifiers.email);
+  const expectedName = normalizeMondayKey(
+    [identifiers.first_name, identifiers.last_name].filter(Boolean).join(" ")
+  );
+  const narrowed = matches.filter((item) => {
+    const profile = sbaProfileFromMondayItem(item);
+    if (email && profile?.email === email) return true;
+    return Boolean(expectedName && normalizeMondayKey(profile?.full_name) === expectedName);
+  });
+  const candidates = narrowed.length ? narrowed : matches;
+  if (candidates.length !== 1) {
+    return {
+      success: true,
+      found: false,
+      status: candidates.length > 1 ? "multiple_matches" : "not_found",
+      match_count: candidates.length
+    };
+  }
+  const item = candidates[0];
+  const profile = sbaProfileFromMondayItem(item);
+  await pool.query(
+    `UPDATE ai_calls SET monday_item_id = $2, monday_group_id = $3,
+     result = result || $4::jsonb, updated_at = NOW() WHERE call_id = $1`,
+    [
+      call.call_id,
+      String(item.id),
+      item.group?.id || INBOUND_MONDAY.groups.newInboundCalls,
+      JSON.stringify({
+        ...profile,
+        sba_lead_match_status: "matched",
+        existing_profile_loaded: true
+      })
+    ]
+  );
+  return { success: true, found: true, status: "matched", profile };
 }
 
 async function createInboundCallerItem(data = {}, options = {}) {
@@ -4105,9 +3910,8 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     data,
     diagnostic ? { ...diagnostic, operation: "board_metadata" } : null
   );
-  const requiredColumnValues = buildInboundMondayUpdateValues({
+  const requiredColumnValues = buildSbaMondayUpdateValues({
     data,
-    columns: INBOUND_MONDAY.columns,
     metadata,
     onSkippedColumn: ({
       field,
@@ -4286,14 +4090,20 @@ async function moveInboundCallerToGroup(itemId, groupId) {
   return result.move_item_to_group || null;
 }
 
-async function createInboundFollowUpRecord(itemId, reason) {
+async function createInboundFollowUpRecord(itemId, reason, followUpDate) {
   if (!itemId) return null;
-  const itemName = `Inbound follow-up - ${cleanText(reason, 100) || "Caller assistance requested"}`;
+  const itemName = `Funding follow-up - ${cleanText(reason, 100) || "Funding review"}`;
+  const columnValues = {
+    [SBA_BOARD.subitemColumns.status]: { label: "Working on it" },
+    ...(followUpDate
+      ? { [SBA_BOARD.subitemColumns.date]: { date: followUpDate } }
+      : {})
+  };
   const result = await mondayGraphql(
-    `mutation CreateInboundFollowUp($parentItemId: ID!, $itemName: String!) {
-      create_subitem(parent_item_id: $parentItemId, item_name: $itemName) { id name }
+    `mutation CreateInboundFollowUp($parentItemId: ID!, $itemName: String!, $columnValues: JSON!) {
+      create_subitem(parent_item_id: $parentItemId, item_name: $itemName, column_values: $columnValues) { id name }
     }`,
-    { parentItemId: String(itemId), itemName }
+    { parentItemId: String(itemId), itemName, columnValues: JSON.stringify(columnValues) }
   );
   return result.create_subitem || null;
 }
@@ -4301,9 +4111,6 @@ async function createInboundFollowUpRecord(itemId, reason) {
 function inboundCallSnapshot(call, overrides = {}) {
   const payload = call?.payload || {};
   const result = call?.result || {};
-  const purchaseLocation = parseInboundPurchaseLocation(
-    result.purchase_area || overrides.purchase_area
-  );
   const suppliedName = normalizeInboundFullName(
     firstInboundContactValue(
       160,
@@ -4331,16 +4138,6 @@ function inboundCallSnapshot(call, overrides = {}) {
     overrides.full_name,
     suppliedName.full_name
   );
-  const followUp = result.inbound_follow_up || {};
-  const followUpScheduled = Boolean(
-    (overrides.next_follow_up || result.next_follow_up ||
-      result.follow_up_at || followUp.follow_up_at) &&
-      followUp.follow_up_declined !== true
-  );
-  const transferredToOutbound =
-    result.transferred_to_outbound === true ||
-    overrides.inbound_status === "Transferred to Outbound";
-
   return {
     name: inboundCallerItemName({
       full_name: fullName,
@@ -4352,33 +4149,6 @@ function inboundCallSnapshot(call, overrides = {}) {
     full_name: fullName,
     first_name: firstName,
     last_name: lastName,
-    city: firstInboundContactValue(
-      160,
-      result.purchase_city,
-      overrides.city,
-      purchaseLocation?.city
-    ),
-    state: firstInboundContactValue(
-      100,
-      result.purchase_state,
-      overrides.state,
-      purchaseLocation?.state
-    ),
-    estimated_home_price: normalizeInboundEstimatedHomePrice(
-      result.estimated_home_price || overrides.estimated_home_price
-    ),
-    purchase_timeframe: firstInboundContactValue(
-      500,
-      result.homebuying_timeline,
-      result.purchase_timeframe,
-      overrides.purchase_timeframe
-    ),
-    job_history: firstInboundContactValue(
-      500,
-      result.two_year_employment_history,
-      result.job_history,
-      overrides.job_history
-    ),
     phone: normalizePhone(
       result.phone || result.phone_number || call?.phone || overrides.phone ||
         payload.phone_number || payload.caller_phone
@@ -4386,20 +4156,32 @@ function inboundCallSnapshot(call, overrides = {}) {
     email: normalizeInboundEmail(
       result.email || overrides.email
     ),
-    credit_score: normalizeInboundCreditScore(
-      result.credit_score || result.estimated_credit_score ||
-        overrides.credit_score
-    ),
-    annual_household_income: cleanText(
-      result.annual_household_income ||
-        overrides.annual_household_income ||
-        overrides.annual_income,
-      100
-    ),
-    tax_return_status: normalizeInboundTaxReturnStatus(
-      result.tax_return_status || result.two_year_tax_filing_status ||
-        overrides.tax_return_status
-    ),
+    business_name: cleanText(result.business_name || overrides.business_name, 200),
+    business_entity_type: normalizeSbaEntityType(result.business_entity_type || overrides.business_entity_type),
+    entity_status: cleanText(result.entity_status || overrides.entity_status, 100),
+    time_in_business: cleanText(result.time_in_business || overrides.time_in_business, 200),
+    industry: cleanText(result.industry || overrides.industry, 200),
+    city: cleanText(result.city || overrides.city, 160),
+    state: cleanText(result.state || overrides.state, 100),
+    zip: cleanText(result.zip || overrides.zip, 20),
+    lead_id: cleanText(result.lead_id || overrides.lead_id, 160),
+    funding_use: cleanText(result.funding_use || overrides.funding_use, 500),
+    funding_amount: cleanText(result.funding_amount || overrides.funding_amount, 100),
+    funding_timeline: cleanText(result.funding_timeline || overrides.funding_timeline, 300),
+    estimated_credit_score: normalizeSbaCreditRange(result.estimated_credit_score || overrides.estimated_credit_score),
+    credit_status: cleanText(result.credit_status || overrides.credit_status, 100),
+    gross_monthly_revenue: normalizeSbaRevenueRange(result.gross_monthly_revenue || overrides.gross_monthly_revenue),
+    income_status: cleanText(result.income_status || overrides.income_status, 100),
+    monthly_business_expenses: cleanText(result.monthly_business_expenses || overrides.monthly_business_expenses, 100),
+    existing_business_financing: cleanText(result.existing_business_financing || overrides.existing_business_financing, 500),
+    taxes: cleanText(result.taxes || result.tax_returns_status || overrides.taxes || overrides.tax_returns_status, 500),
+    tax_status: cleanText(result.tax_status || overrides.tax_status, 100),
+    tax_years_available: cleanText(result.tax_years_available || overrides.tax_years_available, 100),
+    bank_statements_available: result.bank_statements_available ?? overrides.bank_statements_available,
+    financial_statements_available: result.financial_statements_available ?? overrides.financial_statements_available,
+    preliminary_readiness: cleanText(result.preliminary_readiness || overrides.preliminary_readiness, 500),
+    missing_items: Array.isArray(result.missing_items) ? result.missing_items : overrides.missing_items,
+    next_action: cleanText(result.next_action || call?.next_action || overrides.next_action, 500),
     date_called: inboundDateCalled(
       overrides.date_called || result.date_called ||
         call?.started_at || call?.created_at
@@ -4422,36 +4204,11 @@ function inboundCallSnapshot(call, overrides = {}) {
         result.call_outcome || call?.outcome || call?.status,
       100
     ),
-    follow_up_needed: cleanText(overrides.follow_up_needed, 30) ||
-      (followUpScheduled || transferredToOutbound ? "Yes" : "No"),
     lead_source: cleanText(
       overrides.lead_source || result.lead_source || payload.lead_source,
       160
     ),
-    next_follow_up: normalizeInboundLocalDate(
-      followUp.follow_up_date || result.next_follow_up_date ||
-        overrides.next_follow_up
-    ),
-    follow_up_time: normalizeInboundLocalTime(
-      result.follow_up_time || followUp.follow_up_time ||
-        result.callback_local_time || overrides.follow_up_time
-    ),
-    follow_up_timezone: cleanText(
-      result.follow_up_timezone || followUp.follow_up_timezone ||
-        result.callback_timezone || overrides.follow_up_timezone,
-      100
-    ),
-    follow_up_at: cleanText(
-      result.follow_up_at || followUp.follow_up_at ||
-        result.callback_at || overrides.follow_up_at,
-      100
-    ),
     call_direction: cleanText(call?.direction || payload.direction, 20),
-    appointment_type: cleanText(
-      result.appointment_type || result.callback_type ||
-        overrides.appointment_type,
-      100
-    ),
     completion_date: cleanText(
       result.call_ended_at || call?.completed_at ||
         overrides.completion_date,
@@ -4462,57 +4219,31 @@ function inboundCallSnapshot(call, overrides = {}) {
 
 function buildInboundCompletionSummary(call, completionStatus, sourceSummary) {
   const result = call?.result || {};
-  const followUp = result.inbound_follow_up || {};
   const detailedSummary = cleanText(sourceSummary, 1800);
-  const readinessStatus = result.application_status ||
-    (result.readiness_application_completed === true
-      ? "Completed"
-      : result.readiness_application_started === true
-        ? "Started"
-        : "Not confirmed");
-  const followUpSummary = followUp.follow_up_declined === true
-    ? "Declined"
-    : followUp.follow_up_date || result.follow_up_date
-      ? `Scheduled for ${followUp.follow_up_date || result.follow_up_date}` +
-        `${followUp.follow_up_time || result.follow_up_time
-          ? ` at ${followUp.follow_up_time || result.follow_up_time}`
-          : ""}` +
-        `${followUp.follow_up_timezone || result.follow_up_timezone
-          ? ` ${followUp.follow_up_timezone || result.follow_up_timezone}`
-          : ""}`
-      : "Not scheduled";
   const normalCompletion =
     result.normal_completion_recorded === true ||
     result.completion_reason === "normal_completion";
   const terminalSummary = normalCompletion
     ? "Completed normally"
     : `Disconnected (${cleanText(completionStatus || call?.status, 50) || "unknown"})`;
-  const specialistHandoff = result.transferred_to_outbound === true
-    ? "Requested"
-    : "Not requested";
   const reason = cleanText(
     result.reason_for_call || result.inbound_intent || call?.intent,
     200
   ) || "Not captured";
-  const mainQuestion = cleanText(
-    result.main_question || result.primary_question ||
-      call?.pending_question_text,
-    300
-  ) || "Not captured";
-
   return cleanText(
     [
+      "Inbound SBA Funding Call",
       ...(detailedSummary ? [`Call details: ${detailedSummary}`] : []),
-      `Why the caller called: ${reason}`,
-      `Main question: ${mainQuestion}`,
-      `Credit score: ${cleanText(result.estimated_credit_score, 100) || "Not provided"}`,
-      `Tax return status: ${normalizeInboundTaxReturnStatus(result.two_year_tax_filing_status) || "Not provided"}`,
-      `Readiness application status: ${readinessStatus}`,
-      `Timeline: ${cleanText(result.homebuying_timeline || result.purchase_timeline_detail || result.time_frame, 300) || "Not provided"}`,
-      `Realtor status: ${cleanText(result.has_realtor, 50) || "Not confirmed"}`,
-      `Lender status: ${cleanText(result.applied_with_lender || result.has_lender, 50) || "Not confirmed"}`,
-      `Follow-up: ${followUpSummary}`,
-      `Specialist handoff: ${specialistHandoff}`,
+      `Intent: ${reason}`,
+      `Funding request: ${cleanText(result.funding_amount, 100) || "Not provided"}`,
+      `Use of funds: ${cleanText(result.funding_use, 500) || "Not provided"}`,
+      `Business profile: ${[result.business_entity_type, result.industry].filter(Boolean).join(", ") || "Not provided"}`,
+      `Time in business: ${cleanText(result.time_in_business, 200) || "Not provided"}`,
+      `Monthly revenue: ${cleanText(result.gross_monthly_revenue, 120) || "Not provided"}`,
+      `Estimated credit: ${cleanText(result.estimated_credit_score, 100) || "Not provided"}`,
+      `Taxes/documents: ${cleanText(result.taxes || result.tax_returns_status, 500) || "Not provided"}`,
+      `Preliminary readiness: ${cleanText(result.preliminary_readiness, 500) || "Not assessed"}`,
+      `Missing items: ${Array.isArray(result.missing_items) ? result.missing_items.join(", ") : cleanText(result.missing_items, 500) || "None recorded"}`,
       `Next action: ${cleanText(call?.next_action || result.next_action, 500) || "None recorded"}`,
       terminalSummary
     ].join("; "),
@@ -4552,30 +4283,41 @@ async function saveInboundCallSummary(data = {}) {
         full_name: snapshot.full_name,
         first_name: snapshot.first_name,
         last_name: snapshot.last_name,
-        purchase_city: snapshot.city,
-        purchase_state: snapshot.state,
-        estimated_home_price: snapshot.estimated_home_price,
-        purchase_timeframe: snapshot.purchase_timeframe,
-        job_history: snapshot.job_history,
+        business_name: snapshot.business_name,
+        business_entity_type: snapshot.business_entity_type,
+        entity_status: snapshot.entity_status,
+        time_in_business: snapshot.time_in_business,
+        industry: snapshot.industry,
+        city: snapshot.city,
+        state: snapshot.state,
+        zip: snapshot.zip,
+        lead_id: snapshot.lead_id,
+        funding_use: snapshot.funding_use,
+        funding_amount: snapshot.funding_amount,
+        funding_timeline: snapshot.funding_timeline,
         phone: snapshot.phone,
         email: snapshot.email,
-        credit_score: snapshot.credit_score,
-        annual_household_income: snapshot.annual_household_income,
-        tax_return_status: snapshot.tax_return_status,
+        estimated_credit_score: snapshot.estimated_credit_score,
+        credit_status: snapshot.credit_status,
+        gross_monthly_revenue: snapshot.gross_monthly_revenue,
+        income_status: snapshot.income_status,
+        monthly_business_expenses: snapshot.monthly_business_expenses,
+        existing_business_financing: snapshot.existing_business_financing,
+        taxes: snapshot.taxes,
+        tax_status: snapshot.tax_status,
+        tax_years_available: snapshot.tax_years_available,
+        bank_statements_available: snapshot.bank_statements_available,
+        financial_statements_available: snapshot.financial_statements_available,
+        preliminary_readiness: snapshot.preliminary_readiness,
+        missing_items: snapshot.missing_items,
         date_called: snapshot.date_called,
         ...(sourceSummary ? { agent_call_summary: sourceSummary } : {}),
         summary,
         call_summary: sourceSummary || summary,
         caller_type: snapshot.caller_type,
         call_status: snapshot.call_status,
-        follow_up_needed: snapshot.follow_up_needed,
         lead_source: snapshot.lead_source,
-        next_follow_up: snapshot.next_follow_up,
-        follow_up_time: snapshot.follow_up_time,
-        follow_up_timezone: snapshot.follow_up_timezone,
-        follow_up_at: snapshot.follow_up_at,
         call_direction: snapshot.call_direction,
-        appointment_type: snapshot.appointment_type,
         completion_date: snapshot.completion_date,
         disconnect_reason: cleanText(
           data.disconnect_reason || call.result?.disconnect_reason,
@@ -4713,8 +4455,17 @@ async function syncInboundMondayCaller(call) {
     }
     const resolved = await retryTransientOperation(
       async () => {
-        const existing = await findInboundCallerByPhone(call.phone);
-        if (existing?.id) return { item: existing, existing: true };
+        const matches = await findInboundCallersByPhone(call.phone);
+        if (matches.length === 1) {
+          return {
+            item: matches[0],
+            existing: true,
+            profile: sbaProfileFromMondayItem(matches[0])
+          };
+        }
+        if (matches.length > 1) {
+          return { item: null, existing: false, multiple: true, matchCount: matches.length };
+        }
         const item = await createInboundCallerItem(initialData, {
           callId: call.call_id,
           twilioCallSid: call.twilio_call_sid
@@ -4738,10 +4489,26 @@ async function syncInboundMondayCaller(call) {
         }
       }
     );
-    const { item, existing } = resolved;
+    const { item, existing, profile, multiple, matchCount } = resolved;
+    if (multiple) {
+      await client.query(
+        `UPDATE ai_calls SET result = result || $2::jsonb, updated_at = NOW()
+         WHERE call_id = $1`,
+        [
+          call.call_id,
+          JSON.stringify({
+            sba_lead_match_status: "multiple_matches",
+            sba_lead_match_count: matchCount
+          })
+        ]
+      );
+    }
     if (item?.id) {
       if (existing) {
-        await updateInboundCallerItem(item.id, initialData, {
+        await updateInboundCallerItem(item.id, {
+          phone: initialData.phone,
+          updated_date: new Date().toISOString()
+        }, {
           callId: call.call_id
         });
       }
@@ -4755,25 +4522,22 @@ async function syncInboundMondayCaller(call) {
           String(item.id),
           item.group?.id || INBOUND_MONDAY.groups.newInboundCalls,
           JSON.stringify({
-            full_name: initialData.full_name,
-            first_name: initialData.first_name,
-            last_name: initialData.last_name,
-            purchase_city: initialData.city,
-            purchase_state: initialData.state,
-            estimated_home_price: initialData.estimated_home_price,
-            purchase_timeframe: initialData.purchase_timeframe,
-            job_history: initialData.job_history,
+            ...(profile || {}),
+            full_name: profile?.full_name || initialData.full_name,
+            first_name: profile?.first_name || initialData.first_name,
+            last_name: profile?.last_name || initialData.last_name,
+            city: profile?.city || initialData.city,
+            zip: profile?.zip || initialData.zip,
             phone: initialData.phone,
-            email: initialData.email,
-            credit_score: initialData.credit_score,
-            tax_return_status: initialData.tax_return_status,
+            email: profile?.email || initialData.email,
             date_called: initialData.date_called,
             summary: initialData.summary,
             caller_type: "Inbound Call",
             call_status: initialData.call_status,
             follow_up_needed: initialData.follow_up_needed,
             lead_source: initialData.lead_source,
-            next_follow_up: initialData.next_follow_up,
+            sba_lead_match_status: existing ? "matched" : "new",
+            existing_profile_loaded: Boolean(existing && profile),
             inbound_monday_snapshot: initialData,
             monday_item_id: String(item.id),
             call_sid: call.twilio_call_sid || null
@@ -6519,22 +6283,34 @@ function publicCallResult(result = {}) {
     "inbound_intent",
     "first_name",
     "last_name",
-    "purchase_city",
-    "purchase_state",
+    "business_name",
+    "business_entity_type",
+    "entity_status",
+    "time_in_business",
+    "industry",
+    "city",
+    "state",
+    "zip",
+    "lead_id",
     "phone_number",
     "email",
-    "estimated_home_price",
-    "estimated_five_percent_assistance",
-    "homebuying_timeline",
+    "funding_use",
+    "funding_amount",
+    "funding_timeline",
     "estimated_credit_score",
-    "annual_household_income",
-    "two_year_employment_history",
-    "two_year_tax_filing_status",
-    "website_visited",
-    "readiness_application_started",
-    "readiness_application_completed",
-    "application_status",
-    "assistance_maximum_mentioned",
+    "credit_status",
+    "gross_monthly_revenue",
+    "income_status",
+    "monthly_business_expenses",
+    "existing_business_financing",
+    "taxes",
+    "tax_status",
+    "tax_years_available",
+    "bank_statements_available",
+    "financial_statements_available",
+    "preliminary_readiness",
+    "missing_items",
+    "next_action",
     "follow_up_date",
     "follow_up_time",
     "follow_up_timezone",
@@ -6547,14 +6323,9 @@ function publicCallResult(result = {}) {
     "transcript_url",
     "call_started_at",
     "call_ended_at",
-    "outbound_applicant_lookup",
-    "purchase_timeline_detail",
-    "time_frame",
-    "interest_level",
-    "applied_with_lender",
-    "has_realtor",
-    "purchase_area",
-    "preliminary_dti_percent",
+    "sba_lead_lookup",
+    "sba_lead_match_status",
+    "existing_profile_loaded",
     "preliminary_dti_classification",
     "application_link_sent",
     "final_outcome",
@@ -7222,9 +6993,9 @@ async function lookupExistingOutboundApplicant({ phone, email, name }) {
 
 const INBOUND_TOOL_NAMES = new Set([
   "save_inbound_caller_context",
-  "lookup_existing_outbound_applicant",
+  "lookup_existing_sba_lead",
   "create_inbound_follow_up",
-  "transfer_inbound_to_outbound"
+  "create_funding_specialist_handoff"
 ]);
 
 async function executeInboundTool(call, name, args) {
@@ -7259,18 +7030,6 @@ async function executeInboundToolUnlocked(call, name, args) {
     if (suppliedEmail && !email) {
       return { success: false, error: "A valid email address is required." };
     }
-    const normalizedEstimatedHomePrice = normalizeInboundEstimatedHomePrice(
-      safeArgs.estimated_home_price
-    );
-    const estimatedHomePriceNumber = Number(normalizedEstimatedHomePrice);
-    const estimatedHomePrice = Number.isFinite(estimatedHomePriceNumber) && estimatedHomePriceNumber > 0
-      ? estimatedHomePriceNumber
-      : null;
-    const estimatedFivePercentAssistance = Number.isFinite(estimatedHomePriceNumber) && estimatedHomePriceNumber > 0
-      ? Number((estimatedHomePriceNumber * 0.05).toFixed(2))
-      : Number.isFinite(Number(safeArgs.estimated_five_percent_assistance))
-        ? Number(safeArgs.estimated_five_percent_assistance)
-        : null;
     const suppliedFullName = cleanInboundContactValue(
       safeArgs.full_name ||
         (!safeArgs.last_name && /\s/.test(String(safeArgs.first_name || ""))
@@ -7305,12 +7064,19 @@ async function executeInboundToolUnlocked(call, name, args) {
           : null),
       160
     );
-    const creditScore = normalizeInboundCreditScore(
+    const creditScore = normalizeSbaCreditRange(
       safeArgs.estimated_credit_score
     );
-    const taxReturnStatus = normalizeInboundTaxReturnStatus(
-      safeArgs.two_year_tax_filing_status
-    );
+    const revenueRange = normalizeSbaRevenueRange(safeArgs.gross_monthly_revenue);
+    const entityType = normalizeSbaEntityType(safeArgs.business_entity_type);
+    const taxDetails = cleanText(safeArgs.tax_returns_status, 500);
+    const taxStatus = taxDetails
+      ? /not filed|behind|delinquent|missing|unavailable/i.test(taxDetails)
+        ? "Stuck"
+        : /filed|current|available|complete/i.test(taxDetails)
+          ? "Done"
+          : "Working on it"
+      : cleanText(safeArgs.tax_status, 100);
     const candidateFields = {
       full_name: fullName,
       first_name: firstName,
@@ -7319,24 +7085,36 @@ async function executeInboundToolUnlocked(call, name, args) {
       phone: phoneNumber || normalizePhone(call.phone),
       email,
       lead_source: cleanText(safeArgs.lead_source, 160),
-      estimated_home_price: estimatedHomePrice,
-      estimated_five_percent_assistance: estimatedFivePercentAssistance,
-      homebuying_timeline: cleanText(safeArgs.homebuying_timeline, 500),
+      business_name: cleanText(safeArgs.business_name, 200),
+      business_entity_type: entityType,
+      entity_status: entityType ? "Complete" : cleanText(safeArgs.entity_status, 100),
+      time_in_business: cleanText(safeArgs.time_in_business, 200),
+      industry: cleanText(safeArgs.industry, 200),
+      city: cleanText(safeArgs.city, 160),
+      state: cleanText(safeArgs.state, 100),
+      zip: cleanText(safeArgs.zip, 20),
+      lead_id: cleanText(safeArgs.lead_id, 160),
+      funding_use: cleanText(safeArgs.funding_use, 500),
+      funding_amount: normalizeInboundAnnualIncome(safeArgs.funding_amount),
+      funding_timeline: cleanText(safeArgs.funding_timeline, 300),
       estimated_credit_score: creditScore,
-      credit_score: creditScore,
-      annual_household_income: normalizeInboundAnnualIncome(
-        safeArgs.annual_household_income
-      ),
-      two_year_employment_history: cleanText(
-        safeArgs.two_year_employment_history,
-        100
-      ),
-      two_year_tax_filing_status: cleanText(safeArgs.two_year_tax_filing_status, 50),
-      tax_return_status: taxReturnStatus,
-      website_visited: safeArgs.website_visited,
-      readiness_application_started: safeArgs.readiness_application_started,
-      readiness_application_completed: safeArgs.readiness_application_completed,
-      application_status: cleanText(safeArgs.application_status, 500),
+      credit_status: creditScore ? (creditScore === "Not sure" ? "Working on it" : "Done") : null,
+      gross_monthly_revenue: revenueRange,
+      income_status: revenueRange ? "Done" : null,
+      monthly_business_expenses: normalizeInboundAnnualIncome(safeArgs.monthly_business_expenses),
+      existing_business_financing: cleanText(safeArgs.existing_business_financing, 500),
+      taxes: taxDetails,
+      tax_status: taxStatus,
+      tax_years_available: cleanText(safeArgs.tax_years_available, 100),
+      bank_statements_available: safeArgs.bank_statements_available,
+      financial_statements_available: safeArgs.financial_statements_available,
+      website_funding_preview_completed: safeArgs.website_funding_preview_completed,
+      existing_profile_confirmed: safeArgs.existing_profile_confirmed,
+      preliminary_readiness: cleanText(safeArgs.preliminary_readiness, 500),
+      missing_items: Array.isArray(safeArgs.missing_items)
+        ? safeArgs.missing_items.map((item) => cleanText(item, 200)).filter(Boolean)
+        : null,
+      next_action: cleanText(safeArgs.next_action, 500),
       call_summary: usefulInboundSummary(safeArgs.call_summary),
       call_outcome: cleanText(safeArgs.call_outcome, 100),
       date_called: call.started_at || call.created_at ||
@@ -7404,9 +7182,17 @@ async function executeInboundToolUnlocked(call, name, args) {
         const persisted = await persistCallSessionToMonday(call.call_id, {
           alreadySerialized: true,
           overrides: {
-            credit_score: savedFields.credit_score,
-            annual_household_income: savedFields.annual_household_income,
-            tax_return_status: savedFields.tax_return_status,
+            business_entity_type: savedFields.business_entity_type,
+            entity_status: savedFields.entity_status,
+            estimated_credit_score: savedFields.estimated_credit_score,
+            credit_status: savedFields.credit_status,
+            gross_monthly_revenue: savedFields.gross_monthly_revenue,
+            income_status: savedFields.income_status,
+            taxes: savedFields.taxes,
+            tax_status: savedFields.tax_status,
+            city: savedFields.city,
+            zip: savedFields.zip,
+            lead_id: savedFields.lead_id,
             summary: savedFields.call_summary,
             call_status: savedFields.call_outcome,
             caller_type: "Inbound Call",
@@ -7415,13 +7201,6 @@ async function executeInboundToolUnlocked(call, name, args) {
           }
         });
         mondayPersisted = persisted?.success === true;
-        if (intent === "EXISTING_APPLICATION_FOLLOWUP") {
-          const updatedCall = (await getCallById(call.call_id)) || call;
-          await moveInboundCallerToGroup(
-            updatedCall.monday_item_id,
-            INBOUND_MONDAY.groups.existingApplicantFollowUp
-          );
-        }
       } catch (error) {
         inboundLog("[MONDAY]", "caller_context_update_failed", {
           call_id: call.call_id,
@@ -7435,12 +7214,11 @@ async function executeInboundToolUnlocked(call, name, args) {
       saved_fields: Object.keys(resultPatch),
       state_changed: stateChanged,
       monday_persisted: mondayPersisted,
-      caller_phone_available: Boolean(phoneNumber || normalizePhone(call.phone)),
-      estimated_five_percent_assistance: estimatedFivePercentAssistance
+      caller_phone_available: Boolean(phoneNumber || normalizePhone(call.phone))
     };
   }
 
-  if (name === "lookup_existing_outbound_applicant") {
+  if (name === "lookup_existing_sba_lead") {
     const recognizedEmail = normalizeInboundEmail(safeArgs.email);
     const recognizedFirstName = cleanInboundContactValue(
       safeArgs.first_name,
@@ -7463,23 +7241,14 @@ async function executeInboundToolUnlocked(call, name, args) {
       if (savedContact?.success !== true) return savedContact;
       call = (await getCallById(call.call_id)) || call;
     }
-    const firstName = cleanInboundContactValue(
-      call.result?.first_name,
-      100
-    );
-    const lastName = cleanInboundContactValue(
-      call.result?.last_name,
-      100
-    );
-    const result = await lookupExistingOutboundApplicant({
-      phone: call.phone,
-      email: normalizeInboundEmail(call.result?.email),
-      name: [firstName, lastName].filter(Boolean).join(" ") ||
-        call.result?.full_name
+    const result = await lookupExistingSbaLead(call, {
+      email: recognizedEmail || normalizeInboundEmail(call.result?.email),
+      first_name: recognizedFirstName || call.result?.first_name,
+      last_name: recognizedLastName || call.result?.last_name
     });
     await mergeCallResult(call.call_id, {
-      outbound_applicant_lookup: result,
-      application_status: result.found ? result.status : "not_found"
+      sba_lead_lookup: result,
+      sba_lead_match_status: result.status
     });
     await appendAction(call.call_id, {
       action: name,
@@ -7492,8 +7261,8 @@ async function executeInboundToolUnlocked(call, name, args) {
 
   if (name === "create_inbound_follow_up") {
     const followUpReason = cleanText(safeArgs.follow_up_reason, 100);
-    if (followUpReason !== "readiness_application") {
-      return { success: false, error: "The follow-up reason must be readiness_application." };
+    if (followUpReason !== "funding_review") {
+      return { success: false, error: "The follow-up reason must be funding_review." };
     }
     const followUpDeclined = safeArgs.follow_up_declined === true;
     const suppliedFollowUpDate = cleanText(safeArgs.follow_up_date, 20);
@@ -7547,8 +7316,8 @@ async function executeInboundToolUnlocked(call, name, args) {
     }
     const callSummary = usefulInboundSummary(safeArgs.call_summary);
     const callOutcome = followUpDeclined
-      ? "new_lead_follow_up_declined"
-      : "new_lead_follow_up_scheduled";
+      ? "sba_follow_up_declined"
+      : "sba_follow_up_scheduled";
     const followUpRecord = {
       follow_up_date: followUpDeclined ? null : followUpDate,
       follow_up_time: followUpDeclined ? null : followUpTime,
@@ -7581,8 +7350,8 @@ async function executeInboundToolUnlocked(call, name, args) {
           call.call_id,
           callOutcome,
           followUpDeclined
-            ? "Caller declined readiness-application follow-up"
-            : `Readiness-application follow-up scheduled for ${nextFollowUp}`,
+            ? "Caller declined funding-review follow-up"
+            : `Funding-review follow-up scheduled for ${nextFollowUp}`,
           callSummary,
           JSON.stringify({
             inbound_follow_up: followUpRecord,
@@ -7635,7 +7404,8 @@ async function executeInboundToolUnlocked(call, name, args) {
             () =>
               createInboundFollowUpRecord(
                 updatedCall.monday_item_id,
-                `Readiness application at ${nextFollowUp}`
+                "Funding review",
+                followUpDate
               ),
             { maxAttempts: 3 }
           );
@@ -7667,7 +7437,7 @@ async function executeInboundToolUnlocked(call, name, args) {
     };
   }
 
-  if (name === "transfer_inbound_to_outbound") {
+  if (name === "create_funding_specialist_handoff") {
     const reason = cleanText(safeArgs.reason, 2000);
     if (!reason) return { success: false, error: "A transfer reason is required." };
     const priority = ["normal", "high", "urgent"].includes(safeArgs.priority)
@@ -7681,7 +7451,7 @@ async function executeInboundToolUnlocked(call, name, args) {
         call.call_id,
         priority,
         reason,
-        JSON.stringify({ transferred_to_outbound: true, transfer_reason: reason })
+        JSON.stringify({ funding_specialist_handoff: true, handoff_reason: reason })
       ]
     );
     await appendAction(call.call_id, {
@@ -7696,7 +7466,7 @@ async function executeInboundToolUnlocked(call, name, args) {
           alreadySerialized: true,
           forceFullState: true,
           overrides: {
-            inbound_status: "Transferred to Outbound",
+            inbound_status: "Funding Specialist Handoff",
             follow_up_needed: "Yes",
             priority
           }
@@ -7708,7 +7478,7 @@ async function executeInboundToolUnlocked(call, name, args) {
           INBOUND_MONDAY.groups.transferredToOutbound
         );
       } catch (error) {
-        inboundLog("[MONDAY]", "outbound_transfer_update_failed", {
+        inboundLog("[MONDAY]", "funding_specialist_handoff_update_failed", {
           call_id: call.call_id,
           error: cleanText(error.message, 300)
         });
@@ -7716,8 +7486,7 @@ async function executeInboundToolUnlocked(call, name, args) {
     }
     return {
       success: true,
-      transferred_to_outbound: true,
-      outbound_call_placed: false,
+      funding_specialist_handoff: true,
       priority,
       monday_persisted: mondayPersisted
     };
@@ -8325,7 +8094,7 @@ app.get("/", (req, res) => {
     mode: "inbound-demo",
     outbound_calls_enabled: false,
     version: DOUG_CONFIG.agentVersion,
-    worker: "Daisy - DPA Help Center inbound receptionist",
+    worker: "Daisy - SBA Help Center virtual funding assistant",
     realtime_model: OPENAI_REALTIME_MODEL,
     voice: OPENAI_VOICE,
     monday_sync: MONDAY_SYNC_ENABLED ? "enabled" : "disabled",
@@ -9537,7 +9306,9 @@ return true;
         preservePendingQuestion: awaitingCustomerResponse,
         response: {
           output_modalities: ["audio"],
-          instructions: `Say exactly: ${JSON.stringify(interestRateResponse())}.${returnToQuestion}`
+          instructions: `Say exactly: ${JSON.stringify(
+            sessionCallPhase === "INBOUND" ? SBA_RATE_RESPONSE : interestRateResponse()
+          )}.${returnToQuestion}`
         }
       });
       return;
@@ -9608,6 +9379,11 @@ return true;
     if (
       [
         "credit_score",
+        "gross_monthly_revenue",
+        "business_entity_type",
+        "time_in_business",
+        "funding_amount",
+        "funding_use",
         "annual_household_income",
         "estimated_home_price",
         "homebuying_timeline",
@@ -9616,7 +9392,17 @@ return true;
       ].includes(String(pendingQuestionType || ""))
     ) {
       const recognizedValue = pendingQuestionType === "credit_score"
-        ? normalizeInboundCreditScore(transcript)
+        ? (sessionCallPhase === "INBOUND"
+          ? normalizeSbaCreditRange(transcript)
+          : normalizeInboundCreditScore(transcript))
+        : pendingQuestionType === "gross_monthly_revenue"
+          ? normalizeSbaRevenueRange(transcript)
+          : pendingQuestionType === "business_entity_type"
+            ? normalizeSbaEntityType(transcript)
+            : pendingQuestionType === "funding_amount"
+              ? normalizeInboundAnnualIncome(transcript)
+              : ["time_in_business", "funding_use"].includes(pendingQuestionType)
+                ? cleanInboundContactValue(transcript, 500)
         : pendingQuestionType === "annual_household_income"
           ? normalizeInboundAnnualIncome(transcript)
           : pendingQuestionType === "estimated_home_price"
@@ -9624,20 +9410,34 @@ return true;
             : pendingQuestionType === "homebuying_timeline"
               ? cleanInboundContactValue(transcript, 500)
               : pendingQuestionType === "tax_return_status"
-                ? normalizeInboundTaxReturnStatus(transcript)
+                ? (sessionCallPhase === "INBOUND"
+                  ? cleanInboundContactValue(transcript, 500)
+                  : normalizeInboundTaxReturnStatus(transcript))
                 : cleanInboundContactValue(transcript, 500);
       if (recognizedValue) {
         const activeCall = (await getCallById(call.call_id)) || call;
         const toolArgs = pendingQuestionType === "credit_score"
           ? { estimated_credit_score: recognizedValue }
+          : pendingQuestionType === "gross_monthly_revenue"
+            ? { gross_monthly_revenue: recognizedValue }
+            : pendingQuestionType === "business_entity_type"
+              ? { business_entity_type: recognizedValue }
+              : pendingQuestionType === "time_in_business"
+                ? { time_in_business: recognizedValue }
+                : pendingQuestionType === "funding_amount"
+                  ? { funding_amount: recognizedValue }
+                  : pendingQuestionType === "funding_use"
+                    ? { funding_use: recognizedValue }
           : pendingQuestionType === "annual_household_income"
             ? { annual_household_income: recognizedValue }
             : pendingQuestionType === "estimated_home_price"
               ? { estimated_home_price: recognizedValue }
               : pendingQuestionType === "homebuying_timeline"
                 ? { homebuying_timeline: recognizedValue }
-                : pendingQuestionType === "tax_return_status"
-                  ? { two_year_tax_filing_status: recognizedValue }
+                  : pendingQuestionType === "tax_return_status"
+                    ? (sessionCallPhase === "INBOUND"
+                      ? { tax_returns_status: recognizedValue }
+                      : { two_year_tax_filing_status: recognizedValue })
                   : { two_year_employment_history: recognizedValue };
         const saved = await executeInboundTool(
           activeCall,
@@ -9657,7 +9457,7 @@ return true;
       }
     }
 
-    if (pendingQuestionType === "purchase_area") {
+    if (sessionCallPhase !== "INBOUND" && pendingQuestionType === "purchase_area") {
       const confirmedPurchaseArea = exactMeaningfulPurchaseArea(transcript);
       const confirmedPurchaseLocation = parseInboundPurchaseLocation(transcript);
       if (
@@ -9731,7 +9531,7 @@ return true;
     )
       ? pendingQuestionType
       : null;
-    if (professionalAnswerKey) {
+    if (sessionCallPhase !== "INBOUND" && professionalAnswerKey) {
       const explicitAnswer = normalizeExplicitYesNo(transcript);
       if (explicitAnswer !== null) {
         const storedAnswer = explicitAnswer ? "Yes" : "No";
@@ -10239,7 +10039,7 @@ return true;
             response: {
               output_modalities: ["audio"],
               instructions:
-                'Say exactly: "Thank you for calling the DPA Help Center. This is Daisy speaking. How can I help you?" Say nothing else until the caller answers.'
+                `Say exactly: ${JSON.stringify(SBA_OPENING)} Say nothing else until the caller answers.`
             }
           });
         }
@@ -10273,6 +10073,7 @@ return true;
         if (event.type === "response.output_audio_transcript.delta") {
           assistantTranscriptBuffer += event.delta || "";
           const includesAssistanceMaximum =
+            sessionCallPhase !== "INBOUND" &&
             /\bup to\s+(?:\$\s*)?(?:100(?:,\s*|\s*)000|one hundred thousand)(?:\s+dollars?)?\b/i.test(
               assistantTranscriptBuffer
             );
@@ -10299,6 +10100,7 @@ return true;
             };
           }
           const duplicatePurchaseLocationQuestion =
+            sessionCallPhase !== "INBOUND" &&
             Boolean(inboundPurchaseLocationLabel(call)) &&
             /\bwhat city and state\b.{0,100}\bpurchase\b/i.test(
               assistantTranscriptBuffer
@@ -10315,7 +10117,7 @@ return true;
                   code: "DUPLICATE_ASSISTANCE_MAXIMUM",
                   replacement: null
                 }
-            : guardAssistantOutput(assistantTranscriptBuffer);
+            : guardAssistantOutput(assistantTranscriptBuffer, sessionCallPhase);
           if (!compliance.allowed && !complianceRecoveryActive) {
             complianceRecoveryActive = true;
             sendToOpenAI({ type: "response.cancel" });
