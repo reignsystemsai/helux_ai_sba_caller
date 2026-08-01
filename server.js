@@ -23,9 +23,11 @@ const {
   buildSbaScheduledClosing
 } = require("./sba-inbound");
 const {
+  SBA_MAIN_BOARD_COLUMN_IDS,
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
   buildSbaQualificationSessionPatch,
+  sbaLogicalFieldForColumnId,
   selectBestSbaMondayMatch
 } = require("./sba-monday-persistence");
 
@@ -3684,26 +3686,19 @@ function resolveInboundMondayLabel(column, desiredLabel) {
 
 async function inboundMondayValues(data = {}, diagnostic = null) {
   const metadata = await loadInboundMondayMetadata(false, diagnostic);
-  const values = {};
-  const updatedAt = data.updated_date || data.date_called;
-  if (updatedAt) {
-    const updatedDate = new Date(updatedAt);
-    if (!Number.isNaN(updatedDate.getTime())) {
-      values[INBOUND_MONDAY.columns.updatedDate] = {
-        date: updatedDate.toISOString().slice(0, 10)
-      };
+  return buildSbaMondayUpdateValues({
+    data,
+    metadata,
+    onSkippedColumn: ({ field, columnId, reason }) => {
+      inboundLog("[MONDAY_WRITE]", "field_omitted", {
+        call_id: diagnostic?.call_id || null,
+        board_id: MONDAY_BOARD_ID,
+        logical_field: field,
+        column_id: columnId || null,
+        reason
+      });
     }
-  }
-  if (data.phone) {
-    values[INBOUND_MONDAY.columns.phoneNumber] = {
-      phone: data.phone,
-      countryShortName: "US"
-    };
-  }
-  return {
-    ...values,
-    ...buildSbaMondayUpdateValues({ data, metadata })
-  };
+  });
 }
 
 function inboundMondayItemValue(item, columnId) {
@@ -3916,6 +3911,34 @@ async function createInboundCallerItem(data = {}, options = {}) {
   return item;
 }
 
+function findMondayInvalidColumnId(error) {
+  const errors = Array.isArray(error?.mondayErrors) ? error.mondayErrors : [];
+  const missingColumnError = errors.find((entry) => {
+    const serialized = JSON.stringify(entry || {});
+    return /missing_column|column ID doesn't exist|missing column/i.test(serialized);
+  });
+  if (!missingColumnError) return null;
+  const queue = [missingColumnError];
+  const visited = new Set();
+  while (queue.length) {
+    const value = queue.shift();
+    if (!value || typeof value !== "object" || visited.has(value)) continue;
+    visited.add(value);
+    for (const [key, nested] of Object.entries(value)) {
+      if (/^(?:column_id|columnId)$/i.test(key) && typeof nested === "string") {
+        return cleanText(nested, 100);
+      }
+      if (nested && typeof nested === "object") queue.push(nested);
+      if (typeof nested === "string" && nested.trim().startsWith("{")) {
+        try {
+          queue.push(JSON.parse(nested));
+        } catch {}
+      }
+    }
+  }
+  return null;
+}
+
 async function updateInboundCallerItem(itemId, data = {}, options = {}) {
   if (!itemId) return null;
   const diagnostic = inboundMondayDiagnosticContext(options.callId);
@@ -3923,44 +3946,34 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     false,
     diagnostic ? { ...diagnostic, operation: "board_metadata" } : null
   );
-  const baseColumnValues = await inboundMondayValues(
-    data,
-    diagnostic ? { ...diagnostic, operation: "board_metadata" } : null
-  );
-  const requiredColumnValues = buildSbaMondayUpdateValues({
+  const preparedColumnValues = buildSbaMondayUpdateValues({
     data,
     metadata,
-    onSkippedColumn: ({
-      field,
-      columnId,
-      desiredValue,
-      reason,
-      availableLabels
-    }) => {
-      inboundLog("[MONDAY_ERROR]", "column_value_skipped", {
+    onSkippedColumn: ({ field, columnId, reason }) => {
+      inboundLog("[MONDAY_WRITE]", "field_omitted", {
         call_id: cleanText(options.callId, 100),
-        field,
-        column_id: columnId,
-        desired_value: desiredValue,
-        reason,
-        available_labels: availableLabels
+        board_id: MONDAY_BOARD_ID,
+        logical_field: field,
+        column_id: columnId || null,
+        reason
       });
     }
   });
-  const columnValues = {
-    ...baseColumnValues,
-    ...requiredColumnValues
-  };
-  const serializedColumnValues = JSON.stringify(columnValues);
-  inboundLog("[MONDAY_UPDATE]", "column_values", {
-    call_id: cleanText(options.callId, 100),
-    monday_item_id: String(itemId),
-    board_id: MONDAY_BOARD_ID,
-    logical_fields: Object.keys(data).filter((field) =>
-      data[field] !== undefined && data[field] !== null && data[field] !== ""
-    ),
-    column_ids: Object.keys(columnValues)
-  });
+  const columnValues = Object.fromEntries(
+    Object.entries(preparedColumnValues).filter(([columnId]) => {
+      const allowed = SBA_MAIN_BOARD_COLUMN_IDS.includes(columnId);
+      if (!allowed) {
+        inboundLog("[MONDAY_WRITE]", "field_omitted", {
+          call_id: cleanText(options.callId, 100),
+          board_id: MONDAY_BOARD_ID,
+          logical_field: sbaLogicalFieldForColumnId(columnId),
+          column_id: columnId,
+          reason: "not_an_sba_main_board_mapping"
+        });
+      }
+      return allowed;
+    })
+  );
   if (diagnostic) {
     inboundLog("[MONDAY_DIAGNOSTIC]", "update_payload", {
       ...diagnostic,
@@ -3981,45 +3994,68 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     });
   }
   let updated = { id: String(itemId) };
-  if (Object.keys(columnValues).length) {
-    const result = await mondayGraphql(
-      `mutation UpdateInboundCaller($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
-        change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) { id }
-      }`,
-      {
-        boardId: MONDAY_BOARD_ID,
-        itemId: String(itemId),
-        columnValues: serializedColumnValues
-      },
-      diagnostic
-        ? {
-            ...diagnostic,
-            operation: "change_multiple_column_values",
-            always_log_raw_response: true,
-            monday_item_id: String(itemId),
-            board_id: MONDAY_BOARD_ID
-          }
-        : {
-            call_id: cleanText(options.callId, 100),
-            monday_item_id: String(itemId),
-            board_id: MONDAY_BOARD_ID,
-            operation: "change_multiple_column_values",
-            always_log_raw_response: true,
-            update_logging_only: true
-          }
-    );
-    const changed = result.change_multiple_column_values;
-    if (!changed?.id) {
-      throw new Error("monday.com did not return an item ID for the column update.");
-    }
-    updated = changed;
-    inboundLog("[MONDAY_UPDATE]", "mutation_confirmed", {
+  const pendingColumnValues = { ...columnValues };
+  while (Object.keys(pendingColumnValues).length) {
+    const pendingColumnIds = Object.keys(pendingColumnValues);
+    inboundLog("[MONDAY_WRITE]", "payload_prepared", {
       call_id: cleanText(options.callId, 100),
-      monday_item_id: String(changed.id),
       board_id: MONDAY_BOARD_ID,
-      column_ids: Object.keys(columnValues),
-      update_success: true
+      item_id: String(itemId),
+      logical_fields: pendingColumnIds.map(sbaLogicalFieldForColumnId).filter(Boolean),
+      column_ids: pendingColumnIds
     });
+    try {
+      const result = await mondayGraphql(
+        `mutation UpdateInboundCaller($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
+          change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) { id }
+        }`,
+        {
+          boardId: MONDAY_BOARD_ID,
+          itemId: String(itemId),
+          columnValues: JSON.stringify(pendingColumnValues)
+        },
+        diagnostic
+          ? {
+              ...diagnostic,
+              operation: "change_multiple_column_values",
+              always_log_raw_response: true,
+              monday_item_id: String(itemId),
+              board_id: MONDAY_BOARD_ID
+            }
+          : {
+              call_id: cleanText(options.callId, 100),
+              monday_item_id: String(itemId),
+              board_id: MONDAY_BOARD_ID,
+              operation: "change_multiple_column_values",
+              always_log_raw_response: true,
+              update_logging_only: true
+            }
+      );
+      const changed = result.change_multiple_column_values;
+      if (!changed?.id) {
+        throw new Error("monday.com did not return an item ID for the column update.");
+      }
+      updated = changed;
+      inboundLog("[MONDAY_UPDATE]", "mutation_confirmed", {
+        call_id: cleanText(options.callId, 100),
+        monday_item_id: String(changed.id),
+        board_id: MONDAY_BOARD_ID,
+        column_ids: pendingColumnIds,
+        update_success: true
+      });
+      break;
+    } catch (error) {
+      const invalidColumnId = findMondayInvalidColumnId(error);
+      if (!invalidColumnId || !Object.hasOwn(pendingColumnValues, invalidColumnId)) {
+        throw error;
+      }
+      inboundLog("[MONDAY_WRITE]", "invalid_column", {
+        logical_field: sbaLogicalFieldForColumnId(invalidColumnId),
+        column_id: invalidColumnId,
+        board_id: MONDAY_BOARD_ID
+      });
+      delete pendingColumnValues[invalidColumnId];
+    }
   }
   const name = cleanText(data.full_name || data.name, 160);
   if (name) {

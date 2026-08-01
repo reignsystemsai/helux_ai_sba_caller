@@ -28,7 +28,7 @@ test("uses the verified SBA board mapping", () => {
   assert.equal(SBA_BOARD.subitemBoardId, "18414546876");
   assert.equal(SBA_BOARD.columns.lastName, "text_mm3mx5w");
   assert.equal(SBA_BOARD.columns.incomeStatus, "color_mm56cyba");
-  assert.equal(SBA_BOARD.columns.city, "text_mm4nfn2e");
+  assert.equal(SBA_BOARD.columns.city, null);
   assert.equal(SBA_BOARD.columns.zip, "numeric_mm4nnp3g");
 });
 
@@ -135,7 +135,8 @@ test("SBA Monday updates use supplied IDs and nonblank field mapping", () => {
   );
   assert.match(server, /buildSbaMondayUpdateValues/);
   assert.match(server, /persistSbaQualificationFieldsToMonday/);
-  assert.match(adapter, /if \(value\) values\[columnId\] = value/);
-  assert.match(adapter, /columnByIdOrTitle\(metadata, columnId, title\)/);
+  assert.match(adapter, /mappedSbaMainBoardColumn\(metadata, field, skip\)/);
+  assert.match(adapter, /SBA_MAIN_BOARD_COLUMN_IDS/);
+  assert.doesNotMatch(adapter, /columnByIdOrTitle/);
   assert.doesNotMatch(server, /buildInboundMondayUpdateValues\(/);
 });

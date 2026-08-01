@@ -20,6 +20,30 @@ const SBA_QUALIFICATION_COLUMN_IDS = Object.freeze({
   lead_id: SBA_BOARD.columns.leadId
 });
 
+const SBA_MAIN_BOARD_FIELD_COLUMNS = Object.freeze({
+  first_name: SBA_BOARD.columns.firstName,
+  last_name: SBA_BOARD.columns.lastName,
+  email: SBA_BOARD.columns.email,
+  business_entity_type: SBA_BOARD.columns.businessEntityType,
+  entity_status: SBA_BOARD.columns.entityStatus,
+  phone: SBA_BOARD.columns.phoneNumber,
+  phone_number: SBA_BOARD.columns.phoneNumber,
+  taxes: SBA_BOARD.columns.taxes,
+  tax_status: SBA_BOARD.columns.taxStatus,
+  estimated_credit_score: SBA_BOARD.columns.estimatedCreditScore,
+  credit_status: SBA_BOARD.columns.creditStatus,
+  gross_monthly_revenue: SBA_BOARD.columns.grossMonthlyRevenue,
+  income_status: SBA_BOARD.columns.incomeStatus,
+  updated_date: SBA_BOARD.columns.updatedDate,
+  city: SBA_BOARD.columns.city,
+  zip: SBA_BOARD.columns.zip,
+  lead_id: SBA_BOARD.columns.leadId
+});
+
+const SBA_MAIN_BOARD_COLUMN_IDS = Object.freeze([
+  ...new Set(Object.values(SBA_MAIN_BOARD_FIELD_COLUMNS).filter(Boolean))
+]);
+
 const SBA_QUALIFICATION_SESSION_FIELDS = Object.freeze([
   "first_name",
   "last_name",
@@ -151,10 +175,27 @@ function buildSbaQualificationSessionPatch(data = {}) {
   );
 }
 
-function columnByIdOrTitle(metadata, columnId, title) {
-  return metadata?.columns?.find((column) => column.id === columnId) ||
-    metadata?.columns?.find((column) => key(column.title) === key(title)) ||
-    null;
+function mappedSbaMainBoardColumn(metadata, field, skip) {
+  const columnId = SBA_MAIN_BOARD_FIELD_COLUMNS[field];
+  if (!columnId) {
+    skip({ field, columnId: null, reason: "sba_main_board_mapping_missing" });
+    return null;
+  }
+  if (!SBA_MAIN_BOARD_COLUMN_IDS.includes(columnId)) {
+    skip({ field, columnId, reason: "not_an_sba_main_board_mapping" });
+    return null;
+  }
+  const column = metadata?.columns?.find((entry) => entry.id === columnId) || null;
+  if (!column) {
+    skip({ field, columnId, reason: "sba_main_board_column_not_found" });
+    return null;
+  }
+  return column;
+}
+
+function sbaLogicalFieldForColumnId(columnId) {
+  return Object.entries(SBA_MAIN_BOARD_FIELD_COLUMNS)
+    .find(([, mappedId]) => mappedId && mappedId === columnId)?.[0] || null;
 }
 
 function columnLabel(column, desired) {
@@ -171,73 +212,90 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
     ? onSkippedColumn
     : () => undefined;
 
-  for (const [field, columnId] of [
-    ["first_name", SBA_BOARD.columns.firstName],
-    ["last_name", SBA_BOARD.columns.lastName],
-    ["taxes", SBA_BOARD.columns.taxes],
-    ["city", SBA_BOARD.columns.city],
-    ["lead_id", SBA_BOARD.columns.leadId]
-  ]) {
+  for (const field of ["first_name", "last_name", "taxes", "city", "lead_id"]) {
     const value = clean(data[field]);
-    if (value) values[columnId] = value;
+    if (!value) continue;
+    const column = mappedSbaMainBoardColumn(metadata, field, skip);
+    if (column) values[column.id] = value;
   }
 
   const email = clean(data.email, 320).toLowerCase();
   if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
-    values[SBA_BOARD.columns.email] = { email, text: email };
+    const column = mappedSbaMainBoardColumn(metadata, "email", skip);
+    if (column) values[column.id] = { email, text: email };
   }
 
   const zip = clean(data.zip, 20).replace(/[^0-9]/g, "");
-  if (zip) values[SBA_BOARD.columns.zip] = zip;
+  if (zip) {
+    const column = mappedSbaMainBoardColumn(metadata, "zip", skip);
+    if (column) values[column.id] = zip;
+  }
 
-  for (const [field, columnId, title] of [
-    ["business_entity_type", SBA_BOARD.columns.businessEntityType, "Business Entity Type"],
-    ["estimated_credit_score", SBA_BOARD.columns.estimatedCreditScore, "Estimated Credit Score"],
-    ["gross_monthly_revenue", SBA_BOARD.columns.grossMonthlyRevenue, "Gross Monthly Revenue"]
+  for (const field of [
+    "business_entity_type",
+    "estimated_credit_score",
+    "gross_monthly_revenue"
   ]) {
     const desired = clean(data[field], 120);
     if (!desired) continue;
-    const column = columnByIdOrTitle(metadata, columnId, title);
+    const column = mappedSbaMainBoardColumn(metadata, field, skip);
+    if (!column) continue;
     const label = columnLabel(column, desired);
     if (column?.id && label) values[column.id] = { labels: [label] };
-    else skip({ field, columnId, desiredValue: desired, reason: "dropdown_label_not_found" });
+    else skip({
+      field,
+      columnId: SBA_MAIN_BOARD_FIELD_COLUMNS[field],
+      desiredValue: desired,
+      reason: "dropdown_label_not_found"
+    });
   }
 
-  for (const [field, columnId, title] of [
-    ["entity_status", SBA_BOARD.columns.entityStatus, "Entity_Status"],
-    ["tax_status", SBA_BOARD.columns.taxStatus, "Tax_Status"],
-    ["credit_status", SBA_BOARD.columns.creditStatus, "Credit_Status"],
-    ["income_status", SBA_BOARD.columns.incomeStatus, "Income_Status"]
+  for (const field of [
+    "entity_status",
+    "tax_status",
+    "credit_status",
+    "income_status"
   ]) {
     const desired = clean(data[field], 100);
     if (!desired) continue;
-    const column = columnByIdOrTitle(metadata, columnId, title);
+    const column = mappedSbaMainBoardColumn(metadata, field, skip);
+    if (!column) continue;
     const label = columnLabel(column, desired);
     if (column?.id && label) values[column.id] = { label };
-    else skip({ field, columnId, desiredValue: desired, reason: "status_label_not_found" });
+    else skip({
+      field,
+      columnId: SBA_MAIN_BOARD_FIELD_COLUMNS[field],
+      desiredValue: desired,
+      reason: "status_label_not_found"
+    });
   }
 
   const phone = clean(data.phone || data.phone_number, 100);
   if (phone) {
-    values[SBA_BOARD.columns.phoneNumber] = {
-      phone,
-      countryShortName: "US"
-    };
+    const field = meaningful(data.phone) ? "phone" : "phone_number";
+    const column = mappedSbaMainBoardColumn(metadata, field, skip);
+    if (column) {
+      values[column.id] = { phone, countryShortName: "US" };
+    }
   }
 
   const updatedAt = new Date(data.updated_date || data.date_called || "");
   if (!Number.isNaN(updatedAt.getTime())) {
-    values[SBA_BOARD.columns.updatedDate] = {
-      date: updatedAt.toISOString().slice(0, 10)
-    };
+    const column = mappedSbaMainBoardColumn(metadata, "updated_date", skip);
+    if (column) {
+      values[column.id] = { date: updatedAt.toISOString().slice(0, 10) };
+    }
   }
 
   return values;
 }
 
 module.exports = {
+  SBA_MAIN_BOARD_COLUMN_IDS,
+  SBA_MAIN_BOARD_FIELD_COLUMNS,
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
   buildSbaQualificationSessionPatch,
+  sbaLogicalFieldForColumnId,
   selectBestSbaMondayMatch
 };

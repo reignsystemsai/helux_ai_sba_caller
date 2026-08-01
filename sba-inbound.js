@@ -31,7 +31,9 @@ const SBA_BOARD = Object.freeze({
     grossMonthlyRevenue: "dropdown_mm3m39yk",
     incomeStatus: "color_mm56cyba",
     updatedDate: "date_mm3mzfd4",
-    city: "text_mm4nfn2e",
+    // The previously supplied City ID was rejected by the live SBA board.
+    // Keep City in session data until a valid SBA main-board ID is supplied.
+    city: null,
     zip: "numeric_mm4nnp3g",
     leadId: "text_mm4nxye8"
   }),

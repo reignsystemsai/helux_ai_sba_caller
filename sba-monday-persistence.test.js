@@ -7,6 +7,8 @@ const test = require("node:test");
 
 const { SBA_BOARD } = require("./sba-inbound");
 const {
+  SBA_MAIN_BOARD_COLUMN_IDS,
+  SBA_MAIN_BOARD_FIELD_COLUMNS,
   SBA_QUALIFICATION_COLUMN_IDS,
   buildSbaMondayUpdateValues,
   buildSbaQualificationSessionPatch,
@@ -15,6 +17,14 @@ const {
 
 const metadata = {
   columns: [
+    { id: SBA_BOARD.columns.firstName, title: "First_Name", type: "text" },
+    { id: SBA_BOARD.columns.lastName, title: "Last_Name", type: "text" },
+    { id: SBA_BOARD.columns.email, title: "Email", type: "email" },
+    { id: SBA_BOARD.columns.phoneNumber, title: "Phone", type: "phone" },
+    { id: SBA_BOARD.columns.taxes, title: "Taxes", type: "text" },
+    { id: SBA_BOARD.columns.updatedDate, title: "Updated_date", type: "date" },
+    { id: SBA_BOARD.columns.zip, title: "Zip", type: "numbers" },
+    { id: SBA_BOARD.columns.leadId, title: "Lead_id", type: "text" },
     {
       id: SBA_BOARD.columns.businessEntityType,
       title: "Business Entity Type",
@@ -73,9 +83,9 @@ test("zero phone matches remain unresolved so the caller item is created", () =>
 });
 
 test("exactly one phone match selects that existing item", () => {
-  const item = mondayMatch({ id: "100" });
+  const item = mondayMatch({ id: "12268683564" });
   const selected = selectBestSbaMondayMatch([item]);
-  assert.equal(selected.item.id, "100");
+  assert.equal(selected.item.id, "12268683564");
   assert.equal(selected.selection_reason, "only_phone_match");
 });
 
@@ -176,6 +186,7 @@ test("revenue answer maps to Gross Monthly Revenue and Income_Status", () => {
 });
 
 test("city and contact values map to supplied SBA columns", () => {
+  const omitted = [];
   const values = buildSbaMondayUpdateValues({
     data: {
       city: "Tampa",
@@ -185,9 +196,13 @@ test("city and contact values map to supplied SBA columns", () => {
       phone: "+18135551212",
       updated_date: "2026-08-01T12:00:00.000Z"
     },
-    metadata
+    metadata,
+    onSkippedColumn: (entry) => omitted.push(entry)
   });
-  assert.equal(values[SBA_BOARD.columns.city], "Tampa");
+  assert.equal(values.text_mm4nfn2e, undefined);
+  assert.ok(omitted.some((entry) =>
+    entry.field === "city" && entry.reason === "sba_main_board_mapping_missing"
+  ));
   assert.equal(values[SBA_BOARD.columns.firstName], "Avery");
   assert.equal(values[SBA_BOARD.columns.lastName], "Stone");
   assert.deepEqual(values[SBA_BOARD.columns.email], {
@@ -201,7 +216,8 @@ test("city and contact values map to supplied SBA columns", () => {
   assert.deepEqual(values[SBA_BOARD.columns.updatedDate], { date: "2026-08-01" });
 });
 
-test("all supplied SBA intake fields retain their existing Monday column mappings", () => {
+test("all valid supplied SBA intake fields retain their existing Monday mappings", () => {
+  const omitted = [];
   const values = buildSbaMondayUpdateValues({
     data: {
       first_name: "Avery",
@@ -230,14 +246,14 @@ test("all supplied SBA intake fields retain their existing Monday column mapping
           settings: { labels: { 1: "Complete" } }
         }
       ]
-    }
+    },
+    onSkippedColumn: (entry) => omitted.push(entry)
   });
   for (const columnId of [
     SBA_BOARD.columns.firstName,
     SBA_BOARD.columns.lastName,
     SBA_BOARD.columns.phoneNumber,
     SBA_BOARD.columns.email,
-    SBA_BOARD.columns.city,
     SBA_BOARD.columns.zip,
     SBA_BOARD.columns.businessEntityType,
     SBA_BOARD.columns.entityStatus,
@@ -252,9 +268,11 @@ test("all supplied SBA intake fields retain their existing Monday column mapping
   ]) {
     assert.ok(Object.hasOwn(values, columnId), `${columnId} must be in the mutation payload`);
   }
+  assert.equal(values.text_mm4nfn2e, undefined);
+  assert.ok(omitted.some((entry) => entry.field === "city"));
 });
 
-test("live qualification mutation payload contains all four required column IDs", () => {
+test("live qualification mutation payload keeps valid fields when City is unmapped", () => {
   const values = buildSbaMondayUpdateValues({
     data: {
       city: "Tampa",
@@ -277,10 +295,77 @@ test("live qualification mutation payload contains all four required column IDs"
       "date_mm3mzfd4",
       "dropdown_mm3m39yk",
       "dropdown_mm3m9731",
-      "dropdown_mm3mpa8p",
-      "text_mm4nfn2e"
+      "dropdown_mm3mpa8p"
     ].sort()
   );
+});
+
+test("SBA inbound allowlist excludes DPA, subitem, and stale City IDs", () => {
+  for (const forbiddenId of [
+    "text_mm4nfn2e",
+    "color_mm571hke",
+    "text_mm57ngpn",
+    "phone_mm5790vb",
+    "person",
+    "status",
+    "date0",
+    "subitems_mm1kzcng"
+  ]) {
+    assert.equal(SBA_MAIN_BOARD_COLUMN_IDS.includes(forbiddenId), false);
+  }
+  assert.equal(SBA_MAIN_BOARD_FIELD_COLUMNS.city, null);
+});
+
+test("metadata validation omits an invalid optional mapping without discarding valid fields", () => {
+  const omitted = [];
+  const values = buildSbaMondayUpdateValues({
+    data: { city: "Tampa", first_name: "Avery", taxes: "Filed" },
+    metadata,
+    onSkippedColumn: (entry) => omitted.push(entry)
+  });
+  assert.deepEqual(values, {
+    [SBA_BOARD.columns.firstName]: "Avery",
+    [SBA_BOARD.columns.taxes]: "Filed"
+  });
+  assert.ok(omitted.some((entry) =>
+    entry.field === "city" && entry.reason === "sba_main_board_mapping_missing"
+  ));
+});
+
+test("resolved item and SBA board IDs reach change_multiple_column_values", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const updateStart = server.indexOf("async function updateInboundCallerItem");
+  const updateEnd = server.indexOf("async function updateInboundCallerFromSession", updateStart);
+  const updateSource = server.slice(updateStart, updateEnd);
+  assert.match(updateSource, /change_multiple_column_values\(board_id: \$boardId, item_id: \$itemId/);
+  assert.match(updateSource, /boardId: MONDAY_BOARD_ID,\s*itemId: String\(itemId\)/);
+  assert.match(updateSource, /"\[MONDAY_WRITE\]", "payload_prepared"/);
+  assert.match(updateSource, /"\[MONDAY_WRITE\]", "invalid_column"/);
+  assert.match(updateSource, /delete pendingColumnValues\[invalidColumnId\]/);
+  assert.equal(SBA_BOARD.mainBoardId, "18414546873");
+  assert.match(updateSource, /item_id: String\(itemId\)/);
+});
+
+test("Monday missing-column diagnostics identify the rejected column for isolation", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const source = server.match(
+    /function findMondayInvalidColumnId\(error\) \{[\s\S]*?\n\}/
+  )?.[0];
+  assert.ok(source, "findMondayInvalidColumnId source must be present");
+  const findMondayInvalidColumnId = new Function(
+    "cleanText",
+    `${source}; return findMondayInvalidColumnId;`
+  )((value, maximum) => String(value || "").trim().slice(0, maximum));
+  const invalidColumnId = findMondayInvalidColumnId({
+    mondayErrors: [{
+      message: "This column ID doesn't exist for the board",
+      extensions: {
+        error_reason: "store.monday.automation.error.missing_column",
+        diagnostic_data: { column_id: "stale_optional_column" }
+      }
+    }]
+  });
+  assert.equal(invalidColumnId, "stale_optional_column");
 });
 
 test("inbound phone comparison normalizes common Monday formats", () => {
