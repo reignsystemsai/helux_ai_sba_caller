@@ -1,0 +1,22 @@
+{
+  "name": "helux-ai-inbound-calls",
+  "version": "1.0.0",
+  "description": "HELUX AI inbound-call demo for the DPA Help Center",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "express": "^5.1.0",
+    "openai": "^5.8.2",
+    "pg": "^8.16.3",
+    "twilio": "^5.7.2",
+    "ws": "^8.18.3"
+  }
+}
