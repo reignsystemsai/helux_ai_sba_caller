@@ -1187,6 +1187,11 @@ function websocketBaseUrl() {
   return PUBLIC_BASE_URL.replace(/^http:/, "ws:").replace(/^https:/, "wss:");
 }
 
+function inboundWebsocketBaseUrl(req) {
+  const requestHost = cleanText(req.get("host"), 300);
+  return requestHost ? `wss://${requestHost}` : websocketBaseUrl();
+}
+
 function callRequestKey(payload) {
   const caseId = cleanText(payload.case_id, 150);
   const leadId = cleanText(payload.lead_id, 150);
@@ -8802,6 +8807,12 @@ app.post(["/incoming-call", "/api/v1/twilio/inbound"], async (req, res, next) =>
       req.body.campaign || req.body.Campaign || req.query.campaign,
       160
     );
+    inboundLog("[TWILIO_WS]", "incoming_call_received", {
+      path: req.path,
+      host: req.get("host") || null,
+      twilio_call_sid: twilioCallSid || null,
+      caller_phone: maskedPhoneLastFour(callerPhone)
+    });
     if (!twilioCallSid) throw new HttpError(422, "CallSid is required.");
 
     const requestKey = `inbound:${twilioCallSid}`;
@@ -8863,8 +8874,9 @@ app.post(["/incoming-call", "/api/v1/twilio/inbound"], async (req, res, next) =>
 
     const response = new twilio.twiml.VoiceResponse();
     const connect = response.connect();
+    const websocketUrl = `${inboundWebsocketBaseUrl(req)}/api/v1/twilio/media`;
     const stream = connect.stream({
-      url: `${websocketBaseUrl()}/api/v1/twilio/media`
+      url: websocketUrl
     });
     const parameters = {
       call_id: call.call_id,
@@ -8879,6 +8891,13 @@ app.post(["/incoming-call", "/api/v1/twilio/inbound"], async (req, res, next) =>
     for (const [name, value] of Object.entries(parameters)) {
       stream.parameter({ name, value: String(value) });
     }
+    inboundLog("[TWILIO_WS]", "twiml_generated", {
+      call_id: call.call_id,
+      twilio_call_sid: twilioCallSid,
+      websocket_url: websocketUrl,
+      parameter_names: Object.keys(parameters),
+      has_stream_token: Boolean(call.stream_token)
+    });
     res.type("text/xml").send(response.toString());
   } catch (error) {
     next(error);
@@ -9065,7 +9084,15 @@ app.post("/api/v1/twilio/status", async (req, res, next) => {
     next(error);
   }
 });
-mediaServer.on("connection", (twilioSocket) => {
+mediaServer.on("error", (error) => {
+  console.error("[TWILIO_WS] WebSocket server error:", error);
+});
+
+mediaServer.on("connection", (twilioSocket, request) => {
+  inboundLog("[TWILIO_WS]", "twilio_websocket_connected", {
+    request_url: request?.url || null,
+    remote_address: request?.socket?.remoteAddress || null
+  });
   let openaiSocket = null;
   let call = null;
   let streamSid = null;
@@ -10142,14 +10169,32 @@ return true;
       OPENAI_REALTIME_MODEL
     )}`;
 
-    openaiSocket = new WebSocket(url, {
-      headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "OpenAI-Safety-Identifier": safetyIdentifier(call)
-      }
+    inboundLog("[OPENAI_WS]", "realtime_connection_attempted", {
+      call_id: call?.call_id || null,
+      model: OPENAI_REALTIME_MODEL,
+      url
     });
 
+    try {
+      openaiSocket = new WebSocket(url, {
+        headers: {
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+          "OpenAI-Safety-Identifier": safetyIdentifier(call)
+        }
+      });
+    } catch (error) {
+      console.error("[OPENAI_WS] Realtime initialization failed:", error);
+      if (twilioSocket.readyState === WebSocket.OPEN) {
+        twilioSocket.close(1011, "OpenAI initialization failed");
+      }
+      return;
+    }
+
     openaiSocket.on("open", () => {
+      inboundLog("[OPENAI_WS]", "realtime_connected", {
+        call_id: call?.call_id || null,
+        model: OPENAI_REALTIME_MODEL
+      });
       const realtimeSession = buildRealtimeSession({
         model: OPENAI_REALTIME_MODEL,
         voice: OPENAI_VOICE,
@@ -10596,10 +10641,11 @@ return true;
 
     openaiSocket.on("error", async (error) => {
       try {
-        console.error(
-          `OpenAI socket error for ${call.call_id}:`,
-          error.message
-        );
+        console.error("[OPENAI_WS] Realtime socket error:", {
+          call_id: call?.call_id || null,
+          message: error.message,
+          stack: error.stack
+        });
         await updateCallStatus(call.call_id, "in-progress", {
           last_error: error.message
         });
@@ -10609,11 +10655,11 @@ return true;
     });
 
     openaiSocket.on("close", (code, reason) => {
-      console.log(
-        `OpenAI socket closed for ${call ? call.call_id : "unknown"}: ${code} ${String(
-          reason || ""
-        )}`
-      );
+      inboundLog("[OPENAI_WS]", "realtime_socket_closed", {
+        call_id: call?.call_id || null,
+        code,
+        reason: String(reason || "")
+      });
       if (!closed && twilioSocket.readyState === WebSocket.OPEN) {
         twilioSocket.close();
       }
@@ -10633,12 +10679,48 @@ return true;
         const parameters = message.start?.customParameters || {};
         const callId = cleanText(parameters.call_id, 100);
         const token = cleanText(parameters.stream_token, 160);
+        activeTwilioCallSid = String(
+          message?.start?.callSid || parameters.twilio_call_sid || ""
+        ).trim();
+        activeTwilioStreamSid = String(
+          message?.start?.streamSid || message?.streamSid || ""
+        ).trim();
+        streamSid = activeTwilioStreamSid;
+
+        inboundLog("[TWILIO_WS]", "start_event_received", {
+          call_id: callId || null,
+          custom_parameter_names: Object.keys(parameters),
+          has_stream_token: Boolean(token)
+        });
+        inboundLog("[TWILIO_WS]", "stream_sid_received", {
+          call_id: callId || null,
+          twilio_stream_sid: activeTwilioStreamSid || null
+        });
+        inboundLog("[TWILIO_WS]", "call_sid_received", {
+          call_id: callId || null,
+          twilio_call_sid: activeTwilioCallSid || null
+        });
+
+        if (!callId || !token) {
+          inboundLog("[TWILIO_WS]", "required_parameters_missing", {
+            has_call_id: Boolean(callId),
+            has_stream_token: Boolean(token)
+          });
+        }
 
         call = await validateCallToken(callId, token);
         if (!call) {
+          inboundLog("[TWILIO_WS]", "call_session_rejected", {
+            call_id: callId || null,
+            reason: "ai_calls record or stream token not found"
+          });
           twilioSocket.close(1008, "Invalid stream token");
           return;
         }
+
+        inboundLog("[TWILIO_WS]", "call_session_validated", {
+          call_id: call.call_id
+        });
 
         const activeAttempt = call.last_attempt_id
           ? await getAttemptById(call.last_attempt_id)
@@ -10650,17 +10732,6 @@ return true;
           session_call_phase: sessionCallPhase
         }));
 
-        activeTwilioCallSid =
-          String(
-            message?.start?.callSid || parameters.twilio_call_sid || ""
-          ).trim();
-        activeTwilioStreamSid =
-          String(
-            message?.start?.streamSid ||
-            message?.streamSid ||
-            ""
-          ).trim();
-        streamSid = activeTwilioStreamSid;
         console.log(JSON.stringify({
           event: "twilio_live_call_captured",
           call_id: call?.call_id || null,
@@ -10779,7 +10850,7 @@ return true;
         }
       }
     } catch (error) {
-      console.error("Twilio media message handler failed:", error);
+      console.error("[TWILIO_WS] Media message handler failed:", error);
       if (call) {
         try {
           await updateCallStatus(call.call_id, "in-progress", {
@@ -10792,7 +10863,14 @@ return true;
     }
   });
 
-  twilioSocket.on("close", async () => {
+  twilioSocket.on("close", async (code, reason) => {
+    inboundLog("[TWILIO_WS]", "twilio_socket_closed", {
+      call_id: call?.call_id || null,
+      twilio_call_sid: activeTwilioCallSid || null,
+      twilio_stream_sid: activeTwilioStreamSid || null,
+      code,
+      reason: String(reason || "")
+    });
     closed = true;
     cancelSilenceReminder();
     if (customerTranscriptDebounceTimer) {
@@ -10834,26 +10912,59 @@ return true;
   });
 
   twilioSocket.on("error", (error) => {
-    console.error("Twilio media socket error:", error.message);
+    console.error("[TWILIO_WS] Twilio media socket error:", {
+      call_id: call?.call_id || null,
+      twilio_call_sid: activeTwilioCallSid || null,
+      twilio_stream_sid: activeTwilioStreamSid || null,
+      message: error.message,
+      stack: error.stack
+    });
   });
 });
 
 server.on("upgrade", (request, socket, head) => {
+  inboundLog("[TWILIO_WS]", "websocket_upgrade_received", {
+    request_url: request.url || null,
+    host: request.headers.host || null,
+    upgrade: request.headers.upgrade || null
+  });
+  socket.on("error", (error) => {
+    console.error("[TWILIO_WS] Upgrade socket error:", {
+      request_url: request.url || null,
+      message: error.message,
+      stack: error.stack
+    });
+  });
   try {
     const requestUrl = new URL(
       request.url,
       `http://${request.headers.host || "localhost"}`
     );
+    inboundLog("[TWILIO_WS]", "websocket_upgrade_pathname", {
+      pathname: requestUrl.pathname
+    });
 
     if (requestUrl.pathname !== "/api/v1/twilio/media") {
+      inboundLog("[TWILIO_WS]", "websocket_upgrade_rejected", {
+        pathname: requestUrl.pathname,
+        expected_pathname: "/api/v1/twilio/media"
+      });
       socket.destroy();
       return;
     }
 
+    inboundLog("[TWILIO_WS]", "websocket_upgrade_accepted", {
+      pathname: requestUrl.pathname
+    });
     mediaServer.handleUpgrade(request, socket, head, (websocket) => {
       mediaServer.emit("connection", websocket, request);
     });
-  } catch {
+  } catch (error) {
+    console.error("[TWILIO_WS] WebSocket upgrade failed:", {
+      request_url: request.url || null,
+      message: error.message,
+      stack: error.stack
+    });
     socket.destroy();
   }
 });
