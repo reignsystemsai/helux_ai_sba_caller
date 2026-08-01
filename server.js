@@ -1026,6 +1026,21 @@ function normalizePhone(value) {
   return original;
 }
 
+function normalizeInboundSpokenPhone(value) {
+  const original = cleanText(value, 200);
+  if (!original) return null;
+  const digitBased = normalizePhone(original);
+  if (validE164Phone(digitBased)) return digitBased;
+  const spokenDigits = {
+    zero: "0", oh: "0", o: "0", one: "1", two: "2", three: "3",
+    four: "4", five: "5", six: "6", seven: "7", eight: "8", nine: "9"
+  };
+  const digits = original.toLowerCase().match(/[a-z]+|\d/g)?.map((token) =>
+    /^\d$/.test(token) ? token : spokenDigits[token]
+  ).filter((token) => token !== undefined).join("") || "";
+  return validE164Phone(normalizePhone(digits)) ? normalizePhone(digits) : null;
+}
+
 function validE164Phone(value) {
   return /^\+[1-9]\d{7,14}$/.test(String(normalizePhone(value) || ""));
 }
@@ -1292,11 +1307,19 @@ function buildDaisyInboundInstructions(call) {
     ? String(call.phone)
     : "not provided";
   const callerName = inboundCallerFirstName(call) || "not provided";
+  const callerPhoneLastFour = String(callerPhone).replace(/\D/g, "").slice(-4) ||
+    "unavailable";
+  const phoneVerificationStatus = call?.result?.phone_verified === true
+    ? "verified"
+    : "not_verified";
   const leadSource = cleanText(payload.lead_source, 160) || "not provided";
 
   const profileEntries = inboundSbaProfileEntries(call);
   const script = SBA_INBOUND_SCRIPT
     .replaceAll("{caller_phone}", callerPhone)
+    .replaceAll("{caller_phone_last_four}", callerPhoneLastFour)
+    .replaceAll("{phone_verification_status}", phoneVerificationStatus)
+    .replaceAll("{customer_first_name}", callerName)
     .replaceAll("{caller_name}", callerName)
     .replaceAll("{lead_source}", leadSource)
     .replaceAll(
@@ -1975,6 +1998,7 @@ const INBOUND_TOOLS = Object.freeze([
       first_name: { type: ["string", "null"] },
       last_name: { type: ["string", "null"] },
       phone_number: { type: ["string", "null"] },
+      phone_verified: { type: ["boolean", "null"] },
       email: { type: ["string", "null"] },
       lead_source: { type: ["string", "null"] },
       business_name: { type: ["string", "null"] },
@@ -2641,6 +2665,15 @@ function pendingQuestionType(value) {
   }
   if (/firstandlastname|fullname|yourname/.test(text)) return "caller_name";
   if (/emailaddress|email/.test(text)) return "caller_email";
+  if (/betterserve.*cityandstate|cityandstate.*callingfrom/.test(text)) {
+    return "caller_city_state";
+  }
+  if (/numberendingin.*correct|rightnumber.*endingin/.test(text)) {
+    return "caller_phone_confirmation";
+  }
+  if (/correctcallbacknumber|correctphonenumber|bestcallbacknumber/.test(text)) {
+    return "caller_phone_correction";
+  }
   if (/realtor|realestateagent/.test(text)) return "has_realtor";
   if (/lender|preapproved|preapproval/.test(text)) return "applied_with_lender";
   if (/what.*(?:city|area).*purchase|area.*purchase.*home/.test(text)) {
@@ -3994,6 +4027,7 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     });
   }
   let updated = { id: String(itemId) };
+  let writtenLogicalFields = [];
   const pendingColumnValues = { ...columnValues };
   while (Object.keys(pendingColumnValues).length) {
     const pendingColumnIds = Object.keys(pendingColumnValues);
@@ -4036,6 +4070,9 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
         throw new Error("monday.com did not return an item ID for the column update.");
       }
       updated = changed;
+      writtenLogicalFields = pendingColumnIds
+        .map(sbaLogicalFieldForColumnId)
+        .filter(Boolean);
       inboundLog("[MONDAY_UPDATE]", "mutation_confirmed", {
         call_id: cleanText(options.callId, 100),
         monday_item_id: String(changed.id),
@@ -4070,7 +4107,7 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
     );
     updated = result.change_simple_column_value || updated;
   }
-  return updated;
+  return { ...updated, sba_written_logical_fields: writtenLogicalFields };
 }
 
 async function updateInboundCallerFromSession(
@@ -4804,6 +4841,9 @@ async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
     { maxAttempts: 3 }
   );
   if (!updated?.id) throw new Error("monday.com did not confirm the qualification update.");
+  const writtenLogicalFields = Array.isArray(updated.sba_written_logical_fields)
+    ? updated.sba_written_logical_fields
+    : [];
 
   call = (await getCallById(callId)) || call;
   const snapshot = inboundCallSnapshot(call, qualificationPatch);
@@ -4821,10 +4861,16 @@ async function persistSbaQualificationFieldsToMonday(callId, fields = {}) {
   inboundLog("[MONDAY_UPDATE]", "qualification_update_succeeded", {
     call_id: callId,
     monday_item_id: itemId,
-    logical_fields: logicalFields,
+    logical_fields: writtenLogicalFields,
+    captured_logical_fields: logicalFields,
     column_ids: expectedColumnIds
   });
-  return { success: true, monday_item_id: itemId, logical_fields: logicalFields };
+  return {
+    success: true,
+    monday_item_id: itemId,
+    logical_fields: writtenLogicalFields,
+    captured_logical_fields: logicalFields
+  };
 }
 
 function isInboundCallSession(call) {
@@ -7203,7 +7249,8 @@ const SBA_QUALIFICATION_TOOL_FIELDS = Object.freeze([
   "first_name",
   "last_name",
   "email",
-  "phone_number"
+  "phone_number",
+  "phone_verified"
 ]);
 
 async function executeInboundTool(call, name, args) {
@@ -7240,7 +7287,7 @@ async function executeInboundToolUnlocked(call, name, args) {
       : suppliedIntent || savedIntent || null;
     const suppliedPhone = cleanText(safeArgs.phone_number, 100);
     const phoneNumber = suppliedPhone ? normalizePhone(suppliedPhone) : null;
-    if (suppliedPhone && !phoneNumber) {
+    if (suppliedPhone && !validE164Phone(phoneNumber)) {
       return { success: false, error: "The mobile phone number is invalid." };
     }
     const suppliedEmail = cleanText(safeArgs.email, 320);
@@ -7301,6 +7348,7 @@ async function executeInboundToolUnlocked(call, name, args) {
       last_name: lastName,
       phone_number: phoneNumber,
       phone: phoneNumber || normalizePhone(call.phone),
+      phone_verified: safeArgs.phone_verified === true ? true : null,
       email,
       lead_source: cleanText(safeArgs.lead_source, 160),
       business_name: cleanText(safeArgs.business_name, 200),
@@ -7394,14 +7442,35 @@ async function executeInboundToolUnlocked(call, name, args) {
         ]
       );
     }
+    const capturedSemanticFields = receivedQualificationFields.filter((field) =>
+      savedFields[field] !== undefined && savedFields[field] !== null &&
+      savedFields[field] !== ""
+    );
+    if (capturedSemanticFields.length) {
+      inboundLog("[SBA_FIELD_CAPTURED]", "fields_captured", {
+        call_id: call.call_id,
+        monday_item_id: call.monday_item_id || null,
+        fields: capturedSemanticFields
+      });
+    }
     let mondayPersisted = !INBOUND_MONDAY_CONNECTED;
     if (INBOUND_MONDAY_CONNECTED) {
       try {
+        inboundLog("[SBA_MONDAY_WRITE_ATTEMPT]", "qualification_fields", {
+          call_id: call.call_id,
+          monday_item_id: call.monday_item_id || null,
+          fields: receivedQualificationFields
+        });
         const persisted = await persistSbaQualificationFieldsToMonday(
           call.call_id,
           savedFields
         );
         mondayPersisted = persisted?.success === true;
+        inboundLog("[SBA_MONDAY_WRITE_SUCCESS]", "qualification_fields", {
+          call_id: call.call_id,
+          monday_item_id: persisted?.monday_item_id || call.monday_item_id || null,
+          fields: persisted?.logical_fields || receivedQualificationFields
+        });
       } catch (error) {
         await pool.query(
           `UPDATE ai_calls SET monday_last_error = $2, updated_at = NOW()
@@ -7411,6 +7480,12 @@ async function executeInboundToolUnlocked(call, name, args) {
         inboundLog("[MONDAY_UPDATE]", "qualification_update_failed", {
           call_id: call.call_id,
           logical_fields: receivedQualificationFields,
+          error: cleanText(error.message, 300)
+        });
+        inboundLog("[SBA_MONDAY_WRITE_FAILED]", "qualification_fields", {
+          call_id: call.call_id,
+          monday_item_id: call.monday_item_id || null,
+          fields: receivedQualificationFields,
           error: cleanText(error.message, 300)
         });
       }
@@ -9543,6 +9618,110 @@ return true;
         call_id: call.call_id,
         saved_intent: savedInboundIntent(call)
       }));
+    }
+
+    if (pendingQuestionType === "caller_city_state") {
+      const location = parseInboundPurchaseLocation(transcript);
+      if (location?.city && location?.state) {
+        const activeCall = (await getCallById(call.call_id)) || call;
+        const saved = await executeInboundTool(
+          activeCall,
+          "save_inbound_caller_context",
+          { city: location.city, state: location.state }
+        );
+        if (saved?.success !== true) {
+          throw new Error("The caller city and state could not be persisted.");
+        }
+        call = (await getCallById(call.call_id)) || call;
+        await endLocalWaitingState("caller_city_state_saved");
+        requestAssistantResponse({ queueIfBusy: true });
+        return;
+      }
+      requestAssistantResponse({
+        queueIfBusy: true,
+        allowWhileAwaiting: true,
+        preservePendingQuestion: true,
+        response: {
+          output_modalities: ["audio"],
+          instructions:
+            'Say exactly: "What city and state are you calling from?" Say nothing else.'
+        }
+      });
+      return;
+    }
+
+    if (pendingQuestionType === "caller_phone_confirmation") {
+      const explicitAnswer = normalizeExplicitYesNo(transcript);
+      if (explicitAnswer === true) {
+        const activeCall = (await getCallById(call.call_id)) || call;
+        const saved = await executeInboundTool(
+          activeCall,
+          "save_inbound_caller_context",
+          {
+            phone_number: normalizePhone(activeCall.phone),
+            phone_verified: true
+          }
+        );
+        if (saved?.success !== true) {
+          throw new Error("The caller phone confirmation could not be persisted.");
+        }
+        call = (await getCallById(call.call_id)) || call;
+        await endLocalWaitingState("caller_phone_confirmed");
+        requestAssistantResponse({ queueIfBusy: true });
+        return;
+      }
+      if (explicitAnswer === false) {
+        await endLocalWaitingState("caller_phone_rejected");
+        requestAssistantResponse({
+          queueIfBusy: true,
+          response: {
+            output_modalities: ["audio"],
+            instructions:
+              'Say exactly: "What is the correct callback number?" Say nothing else.'
+          }
+        });
+        return;
+      }
+      requestAssistantResponse({
+        queueIfBusy: true,
+        allowWhileAwaiting: true,
+        preservePendingQuestion: true,
+        response: {
+          output_modalities: ["audio"],
+          instructions: 'Say exactly: "Is that number correct?" Say nothing else.'
+        }
+      });
+      return;
+    }
+
+    if (pendingQuestionType === "caller_phone_correction") {
+      const correctedPhone = normalizeInboundSpokenPhone(transcript);
+      if (correctedPhone) {
+        const activeCall = (await getCallById(call.call_id)) || call;
+        const saved = await executeInboundTool(
+          activeCall,
+          "save_inbound_caller_context",
+          { phone_number: correctedPhone, phone_verified: true }
+        );
+        if (saved?.success !== true) {
+          throw new Error("The corrected callback number could not be persisted.");
+        }
+        call = (await getCallById(call.call_id)) || call;
+        await endLocalWaitingState("caller_phone_corrected");
+        requestAssistantResponse({ queueIfBusy: true });
+        return;
+      }
+      requestAssistantResponse({
+        queueIfBusy: true,
+        allowWhileAwaiting: true,
+        preservePendingQuestion: true,
+        response: {
+          output_modalities: ["audio"],
+          instructions:
+            'Say exactly: "Please say the correct callback number, including the area code." Say nothing else.'
+        }
+      });
+      return;
     }
 
     if (pendingQuestionType === "caller_name") {

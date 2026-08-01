@@ -53,11 +53,14 @@ test("unknown caller follows location, path, qualification, scheduling, and clos
     "How can I help you today?",
     "what city and state are you calling from?",
     "are you mainly calling because you'd like to know how much funding",
-    "Do you currently have a business entity",
+    "Do you have a business entity such as",
     "How many years have you been in business?",
     "About what would you say your credit score is?",
     "gross monthly revenue?",
+    "may I have your first and last name?",
     "have I answered all of your questions?",
+    "You're calling from the number ending in {caller_phone_last_four}, correct?",
+    "what's a good email address for you?",
     "When would be a good time for me to follow up",
     "Just to confirm"
   ]);
@@ -81,6 +84,58 @@ test("business name and industry are not required core qualification questions",
     assert.doesNotMatch(SBA_INBOUND_SCRIPT, new RegExp(prohibitedQuestion.replace(/[?]/g, "\\?"), "i"));
   }
   assert.match(SBA_INBOUND_SCRIPT, /Never ask for business name, industry, type of work, business description, employees, expenses, debt, tax returns, or documentation merely to complete the summary/i);
+});
+
+test("end-of-call contact verification precedes scheduling", () => {
+  assert.match(SBA_INBOUND_SCRIPT, /Phone verification status is already verified, do not ask again/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Do not ask the caller to repeat the full number/i);
+  assert.match(SBA_INBOUND_SCRIPT, /phone_number and phone_verified true/i);
+  assert.match(SBA_INBOUND_SCRIPT, /corrected phone replaces the original caller phone/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Save the normalized email immediately with save_inbound_caller_context/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Read it back only when clarification is genuinely necessary/i);
+});
+
+test("SBA capture wiring separates location and persists corrected contact data", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /return "caller_city_state"/);
+  assert.match(server, /\{ city: location\.city, state: location\.state \}/);
+  assert.match(server, /return "caller_phone_confirmation"/);
+  assert.match(server, /return "caller_phone_correction"/);
+  assert.match(server, /phone = COALESCE\(\$3, phone\)/);
+  assert.match(server, /\{ phone_number: correctedPhone, phone_verified: true \}/);
+  assert.match(server, /replaceAll\("\{caller_phone_last_four\}", callerPhoneLastFour\)/);
+  assert.match(server, /replaceAll\("\{customer_first_name\}", callerName\)/);
+});
+
+test("corrected callback phone normalization accepts digits and spoken digits", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const normalizeSource = server.match(/function normalizePhone\(value\) \{[\s\S]*?\n\}/)?.[0];
+  const spokenSource = server.match(/function normalizeInboundSpokenPhone\(value\) \{[\s\S]*?\n\}/)?.[0];
+  const validSource = server.match(/function validE164Phone\(value\) \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(normalizeSource && spokenSource && validSource);
+  const normalizeInboundSpokenPhone = new Function(
+    "cleanText",
+    `${normalizeSource}; ${spokenSource}; ${validSource}; return normalizeInboundSpokenPhone;`
+  )((value, maximum) => String(value || "").trim().slice(0, maximum));
+  assert.equal(normalizeInboundSpokenPhone("813-555-1212"), "+18135551212");
+  assert.equal(
+    normalizeInboundSpokenPhone("eight one three five five five one two one two"),
+    "+18135551212"
+  );
+  assert.equal(normalizeInboundSpokenPhone("not a phone number"), null);
+});
+
+test("qualification fields write progressively with sanitized SBA diagnostics", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /"\[SBA_FIELD_CAPTURED\]", "fields_captured"/);
+  assert.match(server, /"\[SBA_MONDAY_WRITE_ATTEMPT\]", "qualification_fields"/);
+  assert.match(server, /"\[SBA_MONDAY_WRITE_SUCCESS\]", "qualification_fields"/);
+  assert.match(server, /"\[SBA_MONDAY_WRITE_FAILED\]", "qualification_fields"/);
+  assert.match(server, /persistSbaQualificationFieldsToMonday\(\s*call\.call_id,\s*savedFields/);
+  assert.doesNotMatch(server, /SBA_FIELD_CAPTURED[\s\S]{0,300}(?:email:|phone_number:|city:|state:)/);
+  assert.match(server, /persistFinalInboundSession\(/);
+  assert.match(server, /sba_written_logical_fields: writtenLogicalFields/);
+  assert.match(server, /captured_logical_fields: logicalFields/);
 });
 
 test("existing Monday lead does not repeat confirmed core values", () => {
