@@ -16,9 +16,11 @@ const {
 } = require("./inbound-persistence");
 const {
   SBA_BOARD,
+  SBA_FINAL_THANK_YOU,
   SBA_INBOUND_SCRIPT,
   SBA_INTENTS,
-  SBA_OPENING
+  SBA_OPENING,
+  buildSbaScheduledClosing
 } = require("./sba-inbound");
 
 /* Inlined production dependencies — formerly ./src modules */
@@ -3392,16 +3394,12 @@ function inboundPurchaseLocationLabel(call) {
 
 function buildInboundFinalClosing(call) {
   const firstName = inboundCallerFirstName(call);
-  const followUpConfirmation = formatInboundFollowUpConfirmation(
+  const scheduledFollowUp = formatInboundFollowUpConfirmation(
     call?.result?.inbound_follow_up
   );
-  return `${followUpConfirmation
-    ? `${followUpConfirmation} `
-    : ""
-  }${firstName
-    ? `Thank you for calling the SBA Help Center, ${firstName}.`
-    : "Thank you for calling the SBA Help Center."
-  } Your funding profile and next step have been recorded. Have a wonderful day.`;
+  return scheduledFollowUp
+    ? buildSbaScheduledClosing(firstName)
+    : SBA_FINAL_THANK_YOU;
 }
 
 function normalizeSbaCreditRange(value) {

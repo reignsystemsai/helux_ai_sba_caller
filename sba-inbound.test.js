@@ -7,10 +7,21 @@ const test = require("node:test");
 
 const {
   SBA_BOARD,
+  SBA_FINAL_THANK_YOU,
   SBA_INBOUND_SCRIPT,
   SBA_INTENTS,
-  SBA_OPENING
+  SBA_OPENING,
+  buildSbaScheduledClosing
 } = require("./sba-inbound");
+
+function assertOrdered(source, fragments) {
+  let previous = -1;
+  for (const fragment of fragments) {
+    const current = source.indexOf(fragment);
+    assert.ok(current > previous, `${fragment} must appear in flow order`);
+    previous = current;
+  }
+}
 
 test("uses the verified SBA board mapping", () => {
   assert.equal(SBA_BOARD.mainBoardId, "18414546873");
@@ -21,44 +32,71 @@ test("uses the verified SBA board mapping", () => {
   assert.equal(SBA_BOARD.columns.zip, "numeric_mm4nnp3g");
 });
 
-test("defines the exact SBA opening and four supported intents", () => {
+test("opening is exact and contains no virtual-assistant wording", () => {
   assert.equal(
     SBA_OPENING,
-    "Thank you for calling the SBA Help Center. This is Daisy, your virtual funding assistant. How can I help you today?"
+    "Thank you for calling the SBA Help Center. This is Daisy. How can I help you today?"
   );
+  assert.doesNotMatch(SBA_OPENING, /virtual assistant|virtual funding assistant/i);
+});
+
+test("normalizes the revised three-path flow", () => {
   assert.deepEqual(SBA_INTENTS, [
-    "EXISTING_FUNDING_PREVIEW",
-    "NEW_FUNDING_REQUEST",
-    "QUALIFICATION_OR_FUNDING_AMOUNT",
-    "GENERAL_FUNDING_QUESTION"
+    "FUNDING_AMOUNT",
+    "QUALIFICATION",
+    "READY_TO_START"
   ]);
 });
 
-test("existing website lead uses stored SBA profile without recollection", () => {
-  assert.match(SBA_INBOUND_SCRIPT, /If one lead matched/i);
-  assert.match(SBA_INBOUND_SCRIPT, /Do not recollect fields that the caller confirms/i);
-  assert.match(SBA_INBOUND_SCRIPT, /confirm stored Gross Monthly Revenue/i);
+test("unknown caller follows location, path, qualification, scheduling, and closing order", () => {
+  assertOrdered(SBA_INBOUND_SCRIPT, [
+    "How can I help you today?",
+    "what city and state are you calling from?",
+    "are you mainly calling because you'd like to know how much funding",
+    "Do you currently have a business entity",
+    "How many years have you been in business?",
+    "About what would you say your credit score is?",
+    "gross monthly revenue?",
+    "have I answered all of your questions?",
+    "When would be a good time for me to follow up",
+    "Just to confirm"
+  ]);
+  assert.match(SBA_INBOUND_SCRIPT, /Ask only one primary question at a time/i);
 });
 
-test("new funding inquiry collects a progressive minimum profile", () => {
-  assert.match(SBA_INBOUND_SCRIPT, /If no lead matched/i);
-  assert.match(SBA_INBOUND_SCRIPT, /Obtain first and last name/i);
-  assert.match(SBA_INBOUND_SCRIPT, /Do not ask for all contact fields at once/i);
-  assert.match(SBA_INBOUND_SCRIPT, /What are you primarily looking to use the funding for/i);
+test("existing Monday lead does not repeat confirmed core values", () => {
+  assert.match(SBA_INBOUND_SCRIPT, /Entity, estimated credit, and gross monthly revenue already stored and confirmed count as completed/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Ask only the next missing question/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Do not ask either entity question when the stored entity type was already confirmed/i);
 });
 
-test("qualification, amount, rates, and program answers remain preliminary", () => {
+test("caller questions are answered before qualification resumes", () => {
+  assert.match(SBA_INBOUND_SCRIPT, /answer it naturally before returning to the next unanswered qualification question/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Of course\. What else can I answer for you\?/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Is there anything else I can answer for you\?/i);
+});
+
+test("ready-to-start path still completes qualification", () => {
+  assert.match(SBA_INBOUND_SCRIPT, /READY_TO_START: the caller is ready to start/i);
+  assert.match(SBA_INBOUND_SCRIPT, /The next step is our SBA Help Center readiness application/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Proceed to the next unanswered qualification question/i);
+});
+
+test("qualification language remains preliminary and safe", () => {
   assert.match(SBA_INBOUND_SCRIPT, /do not underwrite, approve, guarantee eligibility/i);
-  assert.match(SBA_INBOUND_SCRIPT, /opportunities up to \$5,000,000/i);
   assert.match(SBA_INBOUND_SCRIPT, /don't want to quote you something inaccurate/i);
   assert.match(SBA_INBOUND_SCRIPT, /SBA 7\(a\)/i);
   assert.doesNotMatch(SBA_INBOUND_SCRIPT, /down payment|homebuyer|realtor|mortgage/i);
 });
 
-test("interruption and normal closing retain the existing call lifecycle", () => {
-  assert.match(SBA_INBOUND_SCRIPT, /Ask one primary question, stop, and wait/i);
+test("scheduled and normal closings use the revised wording without reconnect", () => {
+  assert.equal(
+    buildSbaScheduledClosing("Avery"),
+    "Excellent, Avery. I have that scheduled. In the meantime, you can complete the readiness application anytime at the SBA Help Center website. It should only take about two or three minutes, and there's no credit check to complete it. Thank you for calling the SBA Help Center. We look forward to helping you explore your business funding options. Have a great day."
+  );
+  assert.match(SBA_FINAL_THANK_YOU, /Have a great day\.$/);
   assert.match(SBA_INBOUND_SCRIPT, /Allow interruption/i);
-  assert.match(SBA_INBOUND_SCRIPT, /Do not add a second closing or trigger a reconnect/i);
+  assert.match(SBA_INBOUND_SCRIPT, /Do not add another closing, keep talking, trigger a reconnect/i);
 });
 
 test("Twilio inbound HTTP and media-stream routes remain registered", () => {
