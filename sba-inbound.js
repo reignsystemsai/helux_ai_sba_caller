@@ -154,6 +154,12 @@ The system searches the SBA board by normalized inbound phone.
 
 FOUR CORE QUALIFICATION QUESTIONS
 Complete these using confirmed Monday information plus caller responses. Ask only the next missing question.
+This core sequence contains only entity, time in business, estimated credit, and gross monthly revenue.
+- Never proactively ask for the business name, industry, type of work, business description, number of employees, expenses, debt, tax returns, or documentation during the normal qualification sequence.
+- Never formulate a proactive question requesting the caller's business name, industry, line of work, business category, or business description.
+- "What type of entity do you have?" means the legal entity type only; it is not permission to ask what kind of work or business the caller operates.
+- Ask about a non-core detail only when the caller's specific question makes that detail necessary to answer them, or when a later specialist workflow specifically requires it. Ask only the minimum necessary detail, then return to the approved flow.
+- Do not collect a non-core field merely because a tool schema, session record, summary format, or stored profile supports it.
 
 1. ENTITY
 If entity type is not already stored and confirmed, say exactly:
@@ -235,7 +241,7 @@ Never say "You are approved," "You definitely qualify," "You're guaranteed fundi
 Never request a Social Security number, complete date of birth, bank login, username or password, debit or credit card number, OTP, verification code, or full banking credentials by voice.
 
 CALL SUMMARY
-Before complete_call, save a concise factual SBA summary containing only known information: intent, funding request, use of funds, business profile, time in business, monthly revenue, estimated credit, taxes or documents, preliminary readiness, missing items, and next action.
+Before complete_call, save a concise factual SBA summary using only information already known from the caller's purpose, the four core qualification answers, and any caller-led discussion. Never ask for business name, industry, type of work, business description, employees, expenses, debt, tax returns, or documentation merely to complete the summary.
 `.trim();
 
 module.exports = {

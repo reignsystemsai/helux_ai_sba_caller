@@ -64,6 +64,25 @@ test("unknown caller follows location, path, qualification, scheduling, and clos
   assert.match(SBA_INBOUND_SCRIPT, /Ask only one primary question at a time/i);
 });
 
+test("business name and industry are not required core qualification questions", () => {
+  const coreStart = SBA_INBOUND_SCRIPT.indexOf("FOUR CORE QUALIFICATION QUESTIONS");
+  const coreEnd = SBA_INBOUND_SCRIPT.indexOf("READINESS RECOMMENDATION", coreStart);
+  const coreFlow = SBA_INBOUND_SCRIPT.slice(coreStart, coreEnd);
+  assert.match(coreFlow, /contains only entity, time in business, estimated credit, and gross monthly revenue/i);
+  assert.match(coreFlow, /Never proactively ask for the business name, industry, type of work, business description/i);
+  assert.match(coreFlow, /Ask about a non-core detail only when the caller's specific question makes that detail necessary/i);
+  assert.match(coreFlow, /Do not collect a non-core field merely because a tool schema/i);
+  for (const prohibitedQuestion of [
+    "What is the name of your business?",
+    "What kind of work do you do?",
+    "What industry is your business in?",
+    "What type of business do you operate?"
+  ]) {
+    assert.doesNotMatch(SBA_INBOUND_SCRIPT, new RegExp(prohibitedQuestion.replace(/[?]/g, "\\?"), "i"));
+  }
+  assert.match(SBA_INBOUND_SCRIPT, /Never ask for business name, industry, type of work, business description, employees, expenses, debt, tax returns, or documentation merely to complete the summary/i);
+});
+
 test("existing Monday lead does not repeat confirmed core values", () => {
   assert.match(SBA_INBOUND_SCRIPT, /Entity, estimated credit, and gross monthly revenue already stored and confirmed count as completed/i);
   assert.match(SBA_INBOUND_SCRIPT, /Ask only the next missing question/i);
