@@ -3945,6 +3945,15 @@ async function createInboundCallerItem(data = {}, options = {}) {
       monday_item_id: String(item.id)
     });
   }
+  for (const columnId of Object.keys(columnValues)) {
+    inboundLog("[MONDAY_WRITE]", "field_written", {
+      call_id: cleanText(options.callId, 100),
+      monday_item_id: String(item.id),
+      board_id: MONDAY_BOARD_ID,
+      logical_field: sbaLogicalFieldForColumnId(columnId),
+      column_id: columnId
+    });
+  }
   return item;
 }
 
@@ -4084,6 +4093,15 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
         column_ids: pendingColumnIds,
         update_success: true
       });
+      for (const columnId of pendingColumnIds) {
+        inboundLog("[MONDAY_WRITE]", "field_written", {
+          call_id: cleanText(options.callId, 100),
+          monday_item_id: String(changed.id),
+          board_id: MONDAY_BOARD_ID,
+          logical_field: sbaLogicalFieldForColumnId(columnId),
+          column_id: columnId
+        });
+      }
       break;
     } catch (error) {
       const invalidColumnId = findMondayInvalidColumnId(error);
@@ -4583,14 +4601,17 @@ async function syncInboundMondayCaller(call) {
       return { id: String(latestCall.monday_item_id) };
     }
     call = latestCall;
-    const initialData = inboundCallSnapshot(call, {
-      date_called: call.started_at || call.created_at ||
-        new Date().toISOString().slice(0, 10),
-      call_status: "Inbound Call Started",
-      caller_type: "Inbound Call",
-      inbound_status: "New Inbound Call",
-      follow_up_needed: "No"
-    });
+    const initialData = {
+      ...inboundCallSnapshot(call, {
+        date_called: call.started_at || call.created_at ||
+          new Date().toISOString().slice(0, 10),
+        call_status: "Inbound Call Started",
+        caller_type: "Inbound Call",
+        inbound_status: "New Inbound Call",
+        follow_up_needed: "No"
+      }),
+      source: "Inbound - Phone"
+    };
     const diagnostic = inboundMondayDiagnosticContext(call.call_id);
     if (diagnostic) {
       inboundLog("[MONDAY_DIAGNOSTIC]", "session_snapshot_before_create", {

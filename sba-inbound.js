@@ -19,7 +19,7 @@ const SBA_BOARD = Object.freeze({
     name: "name",
     subitems: "subitems_mm1kzcng",
     firstName: "text_mm3mgv1w",
-    lastName: "text_mm3mx5w",
+    lastName: "text_mm3mwx5w",
     email: "email_mm3mhy1b",
     businessEntityType: "dropdown_mm3mpa8p",
     entityStatus: "color_mm56g2kn",
@@ -35,7 +35,8 @@ const SBA_BOARD = Object.freeze({
     // Keep City in session data until a valid SBA main-board ID is supplied.
     city: null,
     zip: "numeric_mm4nnp3g",
-    leadId: "text_mm4nxye8"
+    leadId: "text_mm4nxye8",
+    source: "text_mm5vdf21"
   }),
   subitemColumns: Object.freeze({
     name: "name",

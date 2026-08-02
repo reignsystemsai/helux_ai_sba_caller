@@ -26,7 +26,8 @@ function assertOrdered(source, fragments) {
 test("uses the verified SBA board mapping", () => {
   assert.equal(SBA_BOARD.mainBoardId, "18414546873");
   assert.equal(SBA_BOARD.subitemBoardId, "18414546876");
-  assert.equal(SBA_BOARD.columns.lastName, "text_mm3mx5w");
+  assert.equal(SBA_BOARD.columns.lastName, "text_mm3mwx5w");
+  assert.equal(SBA_BOARD.columns.source, "text_mm5vdf21");
   assert.equal(SBA_BOARD.columns.incomeStatus, "color_mm56cyba");
   assert.equal(SBA_BOARD.columns.city, null);
   assert.equal(SBA_BOARD.columns.zip, "numeric_mm4nnp3g");

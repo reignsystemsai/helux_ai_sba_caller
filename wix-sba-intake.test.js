@@ -147,6 +147,8 @@ test("POST accepts valid Wix JSON, writes through the SBA item adapter, and retu
   assert.equal(calls.length, 1);
   assert.equal(calls[0].phone, "+14045550199");
   assert.equal(calls[0].updated_date, "2026-08-01");
+  assert.equal(calls[0].last_name, "Stone");
+  assert.equal(calls[0].source, "Inbound - Website");
   assert.deepEqual(logs.map(({ prefix, event }) => [prefix, event]), [
     ["[WIX_SBA_INTAKE]", "received"],
     ["[WIX_SBA_INTAKE]", "monday_write_success"],

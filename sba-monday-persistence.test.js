@@ -25,6 +25,7 @@ const metadata = {
     { id: SBA_BOARD.columns.updatedDate, title: "Updated_date", type: "date" },
     { id: SBA_BOARD.columns.zip, title: "Zip", type: "numbers" },
     { id: SBA_BOARD.columns.leadId, title: "Lead_id", type: "text" },
+    { id: SBA_BOARD.columns.source, title: "Source", type: "text" },
     {
       id: SBA_BOARD.columns.businessEntityType,
       title: "Business Entity Type",
@@ -216,6 +217,28 @@ test("city and contact values map to supplied SBA columns", () => {
   assert.deepEqual(values[SBA_BOARD.columns.updatedDate], { date: "2026-08-01" });
 });
 
+test("last name and lead source use the exact supplied SBA columns", () => {
+  const values = buildSbaMondayUpdateValues({
+    data: {
+      last_name: "Stone",
+      source: "Inbound - Website"
+    },
+    metadata
+  });
+  assert.equal(SBA_BOARD.columns.lastName, "text_mm3mwx5w");
+  assert.equal(SBA_BOARD.columns.source, "text_mm5vdf21");
+  assert.equal(values.text_mm3mwx5w, "Stone");
+  assert.equal(values.text_mm5vdf21, "Inbound - Website");
+  assert.equal(values.text_mm3mx5w, undefined);
+});
+
+test("SBA Source supports acquisition classification values", () => {
+  for (const source of ["Inbound - Website", "Inbound - Phone", "Outbound"]) {
+    const values = buildSbaMondayUpdateValues({ data: { source }, metadata });
+    assert.equal(values.text_mm5vdf21, source);
+  }
+});
+
 test("all valid supplied SBA intake fields retain their existing Monday mappings", () => {
   const omitted = [];
   const values = buildSbaMondayUpdateValues({
@@ -235,7 +258,8 @@ test("all valid supplied SBA intake fields retain their existing Monday mappings
       gross_monthly_revenue: "$5,000 - $25,000",
       income_status: "Done",
       updated_date: "2026-08-01T12:00:00.000Z",
-      lead_id: "LEAD-100"
+      lead_id: "LEAD-100",
+      source: "Inbound - Website"
     },
     metadata: {
       columns: [
@@ -264,7 +288,8 @@ test("all valid supplied SBA intake fields retain their existing Monday mappings
     SBA_BOARD.columns.grossMonthlyRevenue,
     SBA_BOARD.columns.incomeStatus,
     SBA_BOARD.columns.updatedDate,
-    SBA_BOARD.columns.leadId
+    SBA_BOARD.columns.leadId,
+    SBA_BOARD.columns.source
   ]) {
     assert.ok(Object.hasOwn(values, columnId), `${columnId} must be in the mutation payload`);
   }
@@ -344,6 +369,27 @@ test("resolved item and SBA board IDs reach change_multiple_column_values", () =
   assert.match(updateSource, /delete pendingColumnValues\[invalidColumnId\]/);
   assert.equal(SBA_BOARD.mainBoardId, "18414546873");
   assert.match(updateSource, /item_id: String\(itemId\)/);
+});
+
+test("successful SBA writes log the logical field and exact column ID", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  assert.match(server, /"\[MONDAY_WRITE\]", "field_written"/);
+  assert.match(server, /logical_field: sbaLogicalFieldForColumnId\(columnId\)/);
+  assert.match(server, /column_id: columnId/);
+});
+
+test("phone-origin Source is only supplied when creating an unmatched lead", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const syncStart = server.indexOf("async function syncInboundMondayCaller");
+  const syncEnd = server.indexOf("async function ensureInboundMondayCaller", syncStart);
+  const syncSource = server.slice(syncStart, syncEnd);
+  assert.match(syncSource, /source: "Inbound - Phone"/);
+  assert.match(syncSource, /createInboundCallerItem\(initialData/);
+  assert.match(syncSource, /if \(existing\) \{[\s\S]*?updateInboundCallerItem\(resolvedItemId, \{\s*phone: initialData\.phone,\s*updated_date:/);
+  assert.doesNotMatch(
+    syncSource.match(/if \(existing\) \{[\s\S]*?\n    \}/)?.[0] || "",
+    /source:/
+  );
 });
 
 test("Monday missing-column diagnostics identify the rejected column for isolation", () => {

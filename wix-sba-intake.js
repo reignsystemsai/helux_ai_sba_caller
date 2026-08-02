@@ -135,6 +135,7 @@ function createWixSbaIntakeHandlers({
         estimated_funding: cleanText(body.estimated_funding, 120),
         funding_readiness_score: cleanText(body.funding_readiness_score, 120),
         lead_source: cleanText(body.lead_source, 160) || "Wix SBA intake",
+        source: "Inbound - Website",
         page_url: cleanText(body.page_url, 1000),
         submitted_at: Number.isNaN(submittedAt.getTime())
           ? null

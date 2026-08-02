@@ -17,7 +17,8 @@ const SBA_QUALIFICATION_COLUMN_IDS = Object.freeze({
   income_status: SBA_BOARD.columns.incomeStatus,
   city: SBA_BOARD.columns.city,
   updated_date: SBA_BOARD.columns.updatedDate,
-  lead_id: SBA_BOARD.columns.leadId
+  lead_id: SBA_BOARD.columns.leadId,
+  source: SBA_BOARD.columns.source
 });
 
 const SBA_MAIN_BOARD_FIELD_COLUMNS = Object.freeze({
@@ -37,7 +38,8 @@ const SBA_MAIN_BOARD_FIELD_COLUMNS = Object.freeze({
   updated_date: SBA_BOARD.columns.updatedDate,
   city: SBA_BOARD.columns.city,
   zip: SBA_BOARD.columns.zip,
-  lead_id: SBA_BOARD.columns.leadId
+  lead_id: SBA_BOARD.columns.leadId,
+  source: SBA_BOARD.columns.source
 });
 
 const SBA_MAIN_BOARD_COLUMN_IDS = Object.freeze([
@@ -212,7 +214,14 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
     ? onSkippedColumn
     : () => undefined;
 
-  for (const field of ["first_name", "last_name", "taxes", "city", "lead_id"]) {
+  for (const field of [
+    "first_name",
+    "last_name",
+    "taxes",
+    "city",
+    "lead_id",
+    "source"
+  ]) {
     const value = clean(data[field]);
     if (!value) continue;
     const column = mappedSbaMainBoardColumn(metadata, field, skip);
