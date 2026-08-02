@@ -4077,24 +4077,6 @@ async function verifyWixSbaMondayItem(itemId, expected = {}) {
 
 async function updateWixSbaAnalyzerItem(itemId, data = {}) {
   const metadata = await loadInboundMondayMetadata(true);
-  if (data.tax_filing_status) {
-    const column = inboundMondayColumn(
-      metadata,
-      INBOUND_MONDAY.columns.taxFilingStatus
-    );
-    if (!column) {
-      throw new Error(
-        `SBA tax filing status column ${INBOUND_MONDAY.columns.taxFilingStatus} was not found.`
-      );
-    }
-    const label = resolveInboundMondayLabel(column, data.tax_filing_status);
-    if (!label) {
-      throw new Error(
-        `Monday Status label is unavailable: ${data.tax_filing_status}.`
-      );
-    }
-    data = { ...data, tax_filing_status: label };
-  }
   return updateInboundCallerItem(itemId, data, {
     analyzerDiagnostics: true,
     metadata

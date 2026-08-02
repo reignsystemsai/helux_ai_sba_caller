@@ -300,6 +300,23 @@ test("SBA analyzer values use only the supplied main-board mappings", () => {
   assert.equal(Object.values(values).includes("$50,000 - $75,000"), false);
 });
 
+test("tax filing status uses the validated incoming label without a metadata false negative", () => {
+  const metadataWithoutStatusLabels = {
+    columns: metadata.columns.map((column) =>
+      column.id === SBA_BOARD.columns.taxFilingStatus
+        ? { ...column, settings: {} }
+        : column
+    )
+  };
+  const values = buildSbaMondayUpdateValues({
+    data: { tax_filing_status: "I have - 2yrs tax returns" },
+    metadata: metadataWithoutStatusLabels
+  });
+  assert.deepEqual(values.color_mm5vz63f, {
+    label: "I have - 2yrs tax returns"
+  });
+});
+
 test("SBA Source supports acquisition classification values", () => {
   for (const source of ["Inbound - Website", "Inbound - Phone", "Outbound"]) {
     const values = buildSbaMondayUpdateValues({ data: { source }, metadata });

@@ -281,7 +281,6 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
   for (const field of [
     "entity_status",
     "tax_status",
-    "tax_filing_status",
     "credit_status",
     "income_status"
   ]) {
@@ -297,6 +296,16 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
       desiredValue: desired,
       reason: "status_label_not_found"
     });
+  }
+
+  const taxFilingStatus = clean(data.tax_filing_status, 100);
+  if (taxFilingStatus) {
+    const column = mappedSbaMainBoardColumn(
+      metadata,
+      "tax_filing_status",
+      skip
+    );
+    if (column) values[column.id] = { label: taxFilingStatus };
   }
 
   const phone = clean(data.phone || data.phone_number, 100);
