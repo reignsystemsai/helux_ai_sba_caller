@@ -4076,8 +4076,8 @@ async function verifyWixSbaMondayItem(itemId, expected = {}) {
 }
 
 async function updateWixSbaAnalyzerItem(itemId, data = {}) {
+  const metadata = await loadInboundMondayMetadata(true);
   if (data.tax_filing_status) {
-    const metadata = await loadInboundMondayMetadata(false);
     const column = inboundMondayColumn(
       metadata,
       INBOUND_MONDAY.columns.taxFilingStatus
@@ -4095,7 +4095,10 @@ async function updateWixSbaAnalyzerItem(itemId, data = {}) {
     }
     data = { ...data, tax_filing_status: label };
   }
-  return updateInboundCallerItem(itemId, data);
+  return updateInboundCallerItem(itemId, data, {
+    analyzerDiagnostics: true,
+    metadata
+  });
 }
 
 function findMondayInvalidColumnId(error) {
@@ -4129,7 +4132,7 @@ function findMondayInvalidColumnId(error) {
 async function updateInboundCallerItem(itemId, data = {}, options = {}) {
   if (!itemId) return null;
   const diagnostic = inboundMondayDiagnosticContext(options.callId);
-  const metadata = await loadInboundMondayMetadata(
+  const metadata = options.metadata || await loadInboundMondayMetadata(
     false,
     diagnostic ? { ...diagnostic, operation: "board_metadata" } : null
   );
@@ -4161,6 +4164,21 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
       return allowed;
     })
   );
+  if (options.analyzerDiagnostics) {
+    inboundLog("[SBA_ANALYZER_UPDATE]", "mapped_column_values", {
+      monday_item_id: String(itemId),
+      board_id: MONDAY_BOARD_ID,
+      logical_fields: Object.keys(columnValues)
+        .map(sbaLogicalFieldForColumnId)
+        .filter(Boolean),
+      mapped_column_values: Object.fromEntries(
+        Object.entries(columnValues).map(([columnId, value]) => [
+          columnId,
+          sanitizeMondayDiagnosticColumn(columnId, value)
+        ])
+      )
+    });
+  }
   if (diagnostic) {
     inboundLog("[MONDAY_DIAGNOSTIC]", "update_payload", {
       ...diagnostic,
@@ -4224,6 +4242,13 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
         throw new Error("monday.com did not return an item ID for the column update.");
       }
       updated = changed;
+      if (options.analyzerDiagnostics) {
+        inboundLog("[SBA_ANALYZER_UPDATE]", "monday_response", {
+          monday_item_id: String(itemId),
+          board_id: MONDAY_BOARD_ID,
+          monday_response: sanitizeMondayDiagnostic(result)
+        });
+      }
       writtenLogicalFields = pendingColumnIds
         .map(sbaLogicalFieldForColumnId)
         .filter(Boolean);
@@ -4245,6 +4270,18 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
       }
       break;
     } catch (error) {
+      if (options.analyzerDiagnostics) {
+        inboundLog("[SBA_ANALYZER_UPDATE]", "monday_response", {
+          monday_item_id: String(itemId),
+          board_id: MONDAY_BOARD_ID,
+          monday_response: null,
+          graphql_errors: sanitizeMondayDiagnostic(
+            error.mondayErrors || [],
+            "graphql_errors"
+          ),
+          error: cleanText(error.message, 1000)
+        });
+      }
       const invalidColumnId = findMondayInvalidColumnId(error);
       if (!invalidColumnId || !Object.hasOwn(pendingColumnValues, invalidColumnId)) {
         throw error;
@@ -8557,6 +8594,7 @@ const wixSbaAnalyzerHandlers = createWixSbaAnalyzerHandlers({
   log: inboundLog,
   boardId: MONDAY_BOARD_ID,
   cleanText,
+  sanitizeLogData: (value) => sanitizeMondayDiagnostic(value),
   normalizeCreditScore: normalizeSbaCreditRange,
   normalizeRevenueRange: normalizeSbaRevenueRange
 });

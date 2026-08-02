@@ -1,6 +1,8 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
+const path = require("node:path");
 const test = require("node:test");
 
 const {
@@ -82,6 +84,19 @@ test("analyzer update endpoint uses the Wix bridge contract", () => {
   assert.equal(WIX_SBA_ANALYZER_PATH, "/api/intake/sba/update");
 });
 
+test("analyzer Monday mutation preserves the supplied existing item ID", () => {
+  const server = fs.readFileSync(path.join(__dirname, "server.js"), "utf8");
+  const handler = fs.readFileSync(
+    path.join(__dirname, "wix-sba-analyzer.js"),
+    "utf8"
+  );
+  assert.match(handler, /updateItem\(mondayItemId, patch\)/);
+  assert.match(server, /itemId: String\(itemId\)/);
+  assert.match(server, /loadInboundMondayMetadata\(true\)/);
+  assert.match(server, /\[SBA_ANALYZER_UPDATE\].*mapped_column_values/);
+  assert.match(server, /\[SBA_ANALYZER_UPDATE\].*monday_response/);
+});
+
 test("years-in-business labels normalize to meaningful values", () => {
   assert.equal(normalizeYearsInBusiness("Less than 1 year"), 0);
   assert.equal(normalizeYearsInBusiness("1 - 2 years"), 1);
@@ -124,8 +139,25 @@ test("analyzer updates the existing item without forwarding scoring-only fields"
   assert.equal("funding_range" in updates[0].patch, false);
   assert.deepEqual(logs.map(({ event }) => event), [
     "received",
+    "monday_item_id",
+    "incoming_updateData",
+    "received",
+    "normalized_values",
+    "monday_update_success",
     "monday_update_success"
   ]);
+  assert.equal(logs[0].prefix, "[SBA_ANALYZER_UPDATE]");
+  assert.deepEqual(logs[2].details.incoming_field_names, [
+    "monthly_business_expenses",
+    "years_in_business",
+    "tax_filing_status",
+    "average_ending_bank_balance",
+    "estimated_credit_score",
+    "gross_monthly_revenue",
+    "estimated_cash_flow",
+    "funding_range"
+  ]);
+  assert.equal(logs.at(-1).prefix, "[SBA_ANALYZER_UPDATE]");
 });
 
 test("missing or unknown item IDs fail without calling the update mutation", async () => {
@@ -155,4 +187,6 @@ test("analyzer returns failure unless Monday confirms every requested field", as
   assert.equal(res.body.success, false);
   assert.match(res.body.error, /did not confirm fields/);
   assert.equal(logs.at(-1).event, "monday_update_failed");
+  assert.equal(logs.at(-1).prefix, "[WIX_SBA_ANALYZER]");
+  assert.equal(logs.at(-2).prefix, "[SBA_ANALYZER_UPDATE]");
 });

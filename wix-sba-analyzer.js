@@ -72,6 +72,7 @@ function createWixSbaAnalyzerHandlers({
   log,
   boardId,
   cleanText,
+  sanitizeLogData = (value) => value,
   normalizeCreditScore,
   normalizeRevenueRange
 }) {
@@ -80,6 +81,10 @@ function createWixSbaAnalyzerHandlers({
   }
 
   function failed(res, statusCode, mondayItemId, error) {
+    log("[SBA_ANALYZER_UPDATE]", "monday_update_failed", {
+      monday_item_id: mondayItemId || null,
+      error
+    });
     log("[WIX_SBA_ANALYZER]", "monday_update_failed", {
       monday_item_id: mondayItemId || null,
       error
@@ -106,6 +111,17 @@ function createWixSbaAnalyzerHandlers({
     const receivedFields = WIX_SBA_ANALYZER_FIELDS.filter((field) =>
       nonblank(updateData[field])
     );
+    log("[SBA_ANALYZER_UPDATE]", "received", {
+      logical_fields: receivedFields
+    });
+    log("[SBA_ANALYZER_UPDATE]", "monday_item_id", {
+      monday_item_id: mondayItemId || null
+    });
+    log("[SBA_ANALYZER_UPDATE]", "incoming_updateData", {
+      monday_item_id: mondayItemId || null,
+      incoming_field_names: Object.keys(updateData),
+      incoming_updateData: sanitizeLogData(updateData)
+    });
     log("[WIX_SBA_ANALYZER]", "received", {
       monday_item_id: mondayItemId || null,
       logical_fields: receivedFields
@@ -162,6 +178,10 @@ function createWixSbaAnalyzerHandlers({
     } catch (error) {
       return failed(res, 400, mondayItemId, error.message);
     }
+    log("[SBA_ANALYZER_UPDATE]", "normalized_values", {
+      monday_item_id: mondayItemId,
+      normalized_values: sanitizeLogData(patch)
+    });
 
     try {
       const item = await findItem(mondayItemId);
@@ -199,6 +219,10 @@ function createWixSbaAnalyzerHandlers({
       }
 
       log("[WIX_SBA_ANALYZER]", "monday_update_success", {
+        monday_item_id: mondayItemId,
+        updated_fields: writtenFields
+      });
+      log("[SBA_ANALYZER_UPDATE]", "monday_update_success", {
         monday_item_id: mondayItemId,
         updated_fields: writtenFields
       });

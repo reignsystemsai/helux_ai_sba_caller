@@ -256,7 +256,7 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
   if (meaningful(data.years_in_business)) {
     const years = Number(data.years_in_business);
     const column = mappedSbaMainBoardColumn(metadata, "years_in_business", skip);
-    if (column && Number.isFinite(years)) values[column.id] = years;
+    if (column && Number.isFinite(years)) values[column.id] = String(years);
   }
 
   for (const field of [

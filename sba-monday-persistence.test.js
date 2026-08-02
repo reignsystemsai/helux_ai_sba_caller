@@ -285,7 +285,7 @@ test("SBA analyzer values use only the supplied main-board mappings", () => {
     metadata
   });
   assert.equal(values.text_mm5vkcca, "$8,500");
-  assert.equal(values.numeric_mm5vcmax, 2);
+  assert.equal(values.numeric_mm5vcmax, "2");
   assert.deepEqual(values.color_mm5vz63f, {
     label: "I have - 2yrs tax returns"
   });
