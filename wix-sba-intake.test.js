@@ -60,11 +60,27 @@ function validBody() {
 
 function makeHandlers(overrides = {}) {
   const calls = [];
+  const readbacks = [];
   const logs = [];
   const handlers = createWixSbaIntakeHandlers({
     createItem: async (data) => {
       calls.push(data);
-      return { id: "12268683564" };
+      return {
+        id: "12268683564",
+        board: { id: "18414546873" },
+        group: { id: "topics", title: "New Leads" }
+      };
+    },
+    verifyItem: async (itemId, expected) => {
+      readbacks.push({ itemId, expected });
+      return {
+        item_id: itemId,
+        actual_board_id: "18414546873",
+        actual_group_id: "topics",
+        actual_group_name: "New Leads",
+        item_name: expected.full_name,
+        populated_fields: ["first_name", "last_name", "email", "phone"]
+      };
     },
     log: (prefix, event, details) => logs.push({ prefix, event, details }),
     boardId: "18414546873",
@@ -85,7 +101,7 @@ function makeHandlers(overrides = {}) {
     normalizeRevenueRange: (value) => String(value).trim(),
     ...overrides
   });
-  return { handlers, calls, logs };
+  return { handlers, calls, readbacks, logs };
 }
 
 function request(body = {}, origin = "https://www.sbahelpcenter.com") {
@@ -133,8 +149,8 @@ test("missing a required field returns 400", async () => {
   assert.equal(calls.length, 0);
 });
 
-test("POST accepts valid Wix JSON, writes through the SBA item adapter, and returns success", async () => {
-  const { handlers, calls, logs } = makeHandlers();
+test("POST returns success only after the created Monday item passes readback", async () => {
+  const { handlers, calls, readbacks, logs } = makeHandlers();
   const res = mockResponse();
   await handlers.post(request(validBody()), res, (error) => { throw error; });
 
@@ -145,15 +161,49 @@ test("POST accepts valid Wix JSON, writes through the SBA item adapter, and retu
     outbound_triggered: false
   });
   assert.equal(calls.length, 1);
+  assert.equal(readbacks.length, 1);
+  assert.equal(readbacks[0].itemId, "12268683564");
   assert.equal(calls[0].phone, "+14045550199");
   assert.equal(calls[0].updated_date, "2026-08-01");
   assert.equal(calls[0].last_name, "Stone");
   assert.equal(calls[0].source, "Inbound - Website");
   assert.deepEqual(logs.map(({ prefix, event }) => [prefix, event]), [
     ["[WIX_SBA_INTAKE]", "received"],
-    ["[WIX_SBA_INTAKE]", "monday_write_success"],
+    ["[WIX_SBA_INTAKE]", "monday_created"],
+    ["[WIX_SBA_INTAKE]", "monday_readback"],
     ["[WIX_SBA_INTAKE]", "outbound_triggered"]
   ]);
+  assert.deepEqual(logs[1].details, {
+    item_id: "12268683564",
+    board_id: "18414546873",
+    group_id: "topics"
+  });
+  assert.deepEqual(logs[2].details, {
+    item_id: "12268683564",
+    actual_board_id: "18414546873",
+    actual_group_id: "topics",
+    item_name: "Avery Stone",
+    populated_fields: ["first_name", "last_name", "email", "phone"]
+  });
   assert.equal(JSON.stringify(logs).includes("avery@example.com"), false);
   assert.equal(JSON.stringify(logs).includes("4045550199"), false);
+});
+
+test("POST returns success:false with the exact reason when Monday readback fails", async () => {
+  const { handlers, logs } = makeHandlers({
+    verifyItem: async () => {
+      throw new Error("item is on board 999, expected 18414546873.");
+    }
+  });
+  const res = mockResponse();
+  await handlers.post(request(validBody()), res, (error) => { throw error; });
+  assert.equal(res.statusCode, 502);
+  assert.deepEqual(res.body, {
+    success: false,
+    error: "Monday readback verification failed: item is on board 999, expected 18414546873."
+  });
+  assert.ok(logs.some(({ event }) => event === "monday_created"));
+  assert.ok(logs.some(({ event }) => event === "monday_readback_failed"));
+  assert.equal(logs.some(({ event }) => event === "monday_readback"), false);
+  assert.equal(logs.some(({ event }) => event === "outbound_triggered"), false);
 });

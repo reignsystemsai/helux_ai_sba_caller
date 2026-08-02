@@ -59,6 +59,7 @@ function applyWixSbaCors(req, res) {
 
 function createWixSbaIntakeHandlers({
   createItem,
+  verifyItem,
   log,
   boardId,
   cleanText,
@@ -71,6 +72,9 @@ function createWixSbaIntakeHandlers({
 }) {
   if (typeof createItem !== "function") {
     throw new TypeError("createItem is required.");
+  }
+  if (typeof verifyItem !== "function") {
+    throw new TypeError("verifyItem is required.");
   }
 
   function options(req, res) {
@@ -115,7 +119,7 @@ function createWixSbaIntakeHandlers({
       const lastName = cleanText(body.last_name, 100);
       const suppliedFullName = cleanText(body.full_name, 200);
       const submittedAt = new Date(body.submitted_at || Date.now());
-      const item = await createItem({
+      const intakeData = {
         first_name: firstName,
         last_name: lastName,
         full_name: suppliedFullName || `${firstName} ${lastName}`,
@@ -143,16 +147,36 @@ function createWixSbaIntakeHandlers({
         updated_date: Number.isNaN(submittedAt.getTime())
           ? new Date().toISOString().slice(0, 10)
           : submittedAt.toISOString().slice(0, 10)
-      });
+      };
+      const item = await createItem(intakeData);
 
       if (!item?.id) {
         throw new Error("monday.com did not return an SBA intake item ID.");
       }
 
-      log("[WIX_SBA_INTAKE]", "monday_write_success", {
-        board_id: String(boardId),
-        monday_item_id: String(item.id),
-        semantic_fields: receivedFields
+      log("[WIX_SBA_INTAKE]", "monday_created", {
+        item_id: String(item.id),
+        board_id: item.board?.id ? String(item.board.id) : String(boardId),
+        group_id: item.group?.id ? String(item.group.id) : null
+      });
+
+      let readback;
+      try {
+        readback = await verifyItem(String(item.id), intakeData);
+      } catch (error) {
+        const reason = `Monday readback verification failed: ${error.message}`;
+        log("[WIX_SBA_INTAKE]", "monday_readback_failed", {
+          item_id: String(item.id),
+          reason
+        });
+        return res.status(502).json({ success: false, error: reason });
+      }
+      log("[WIX_SBA_INTAKE]", "monday_readback", {
+        item_id: readback.item_id,
+        actual_board_id: readback.actual_board_id,
+        actual_group_id: readback.actual_group_id,
+        item_name: readback.item_name,
+        populated_fields: readback.populated_fields
       });
 
       // This inbound-only service intentionally does not initiate outbound calls.

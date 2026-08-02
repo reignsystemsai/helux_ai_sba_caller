@@ -3721,6 +3721,13 @@ function resolveInboundMondayLabel(column, desiredLabel) {
   ) || null;
 }
 
+function inboundMondayGroupByTitle(metadata, title) {
+  const desired = normalizeMondayKey(title);
+  return metadata?.groups?.find(
+    (group) => normalizeMondayKey(group.title) === desired
+  ) || null;
+}
+
 async function inboundMondayValues(data = {}, diagnostic = null) {
   const metadata = await loadInboundMondayMetadata(false, diagnostic);
   return buildSbaMondayUpdateValues({
@@ -3900,6 +3907,16 @@ async function createInboundCallerItem(data = {}, options = {}) {
   const phone = normalizePhone(data.phone);
   const itemName = inboundCallerItemName({ ...data, phone });
   const diagnostic = inboundMondayDiagnosticContext(options.callId);
+  const targetGroupName = cleanText(options.targetGroupName, 100);
+  const metadata = targetGroupName
+    ? await loadInboundMondayMetadata(false)
+    : null;
+  const targetGroup = targetGroupName
+    ? inboundMondayGroupByTitle(metadata, targetGroupName)
+    : { id: INBOUND_MONDAY.groups.newInboundCalls, title: null };
+  if (!targetGroup?.id) {
+    throw new Error(`monday.com group not found: ${targetGroupName}.`);
+  }
   const columnValues = await inboundMondayValues(
     { ...data, phone },
     diagnostic ? { ...diagnostic, operation: "board_metadata" } : null
@@ -3909,7 +3926,7 @@ async function createInboundCallerItem(data = {}, options = {}) {
       ...diagnostic,
       twilio_call_sid: cleanText(options.twilioCallSid, 80),
       board_id: MONDAY_BOARD_ID,
-      group_id: INBOUND_MONDAY.groups.newInboundCalls,
+      group_id: targetGroup.id,
       item_name: maskMondayDiagnosticText(itemName),
       column_ids: Object.keys(columnValues),
       columns: Object.entries(columnValues).map(([columnId, value]) => ({
@@ -3920,11 +3937,16 @@ async function createInboundCallerItem(data = {}, options = {}) {
   }
   const result = await mondayGraphql(
     `mutation CreateInboundCaller($boardId: ID!, $groupId: String!, $itemName: String!, $columnValues: JSON!) {
-      create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName, column_values: $columnValues) { id name }
+      create_item(board_id: $boardId, group_id: $groupId, item_name: $itemName, column_values: $columnValues) {
+        id
+        name
+        board { id }
+        group { id title }
+      }
     }`,
     {
       boardId: MONDAY_BOARD_ID,
-      groupId: INBOUND_MONDAY.groups.newInboundCalls,
+      groupId: targetGroup.id,
       itemName,
       columnValues: JSON.stringify(columnValues)
     },
@@ -3955,6 +3977,98 @@ async function createInboundCallerItem(data = {}, options = {}) {
     });
   }
   return item;
+}
+
+async function readInboundCallerItem(itemId) {
+  const data = await mondayGraphql(
+    `query ReadInboundCaller($itemIds: [ID!]!) {
+      items(ids: $itemIds) {
+        id
+        name
+        board { id }
+        group { id title }
+        column_values { id text value }
+      }
+    }`,
+    { itemIds: [String(itemId)] }
+  );
+  return data.items?.find((item) => String(item.id) === String(itemId)) || null;
+}
+
+async function verifyWixSbaMondayItem(itemId, expected = {}) {
+  const metadata = await loadInboundMondayMetadata(false);
+  const expectedGroup = inboundMondayGroupByTitle(metadata, "New Leads");
+  if (!expectedGroup?.id) {
+    throw new Error('The "New Leads" group does not exist on SBA board 18414546873.');
+  }
+  const item = await readInboundCallerItem(itemId);
+  if (!item) {
+    throw new Error(`Monday item ${itemId} was not returned by the readback query.`);
+  }
+  if (String(item.board?.id || "") !== MONDAY_BOARD_ID) {
+    throw new Error(
+      `Monday item ${itemId} is on board ${item.board?.id || "unknown"}, expected ${MONDAY_BOARD_ID}.`
+    );
+  }
+  if (String(item.group?.id || "") !== String(expectedGroup.id)) {
+    throw new Error(
+      `Monday item ${itemId} is in group ${item.group?.id || "unknown"}, expected ${expectedGroup.id} (New Leads).`
+    );
+  }
+  if (normalizeMondayKey(item.group?.title) !== normalizeMondayKey("New Leads")) {
+    throw new Error(
+      `Monday item ${itemId} group is named ${item.group?.title || "unknown"}, expected New Leads.`
+    );
+  }
+
+  const actual = {
+    first_name: cleanInboundContactValue(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.firstName),
+      100
+    ),
+    last_name: cleanInboundContactValue(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.lastName),
+      100
+    ),
+    email: normalizeInboundEmail(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.email)
+    ),
+    phone: normalizePhone(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.phoneNumber)
+    )
+  };
+  const expectedName = cleanText(expected.full_name || expected.name, 160);
+  if (!cleanText(item.name, 160)) {
+    throw new Error(`Monday item ${itemId} has a blank item name.`);
+  }
+  if (expectedName && cleanText(item.name, 160) !== expectedName) {
+    throw new Error(`Monday item ${itemId} name does not match the submitted lead.`);
+  }
+  for (const field of ["first_name", "last_name"]) {
+    if (!actual[field]) {
+      throw new Error(`Monday item ${itemId} has a blank ${field} value.`);
+    }
+    if (cleanText(actual[field], 100) !== cleanText(expected[field], 100)) {
+      throw new Error(`Monday item ${itemId} ${field} does not match the submitted value.`);
+    }
+  }
+  if (!actual.email || actual.email !== normalizeInboundEmail(expected.email)) {
+    throw new Error(`Monday item ${itemId} email does not match the submitted value.`);
+  }
+  if (!validE164Phone(actual.phone) || actual.phone !== normalizePhone(expected.phone)) {
+    throw new Error(`Monday item ${itemId} phone does not match the submitted value.`);
+  }
+
+  return {
+    item_id: String(item.id),
+    actual_board_id: String(item.board.id),
+    actual_group_id: String(item.group.id),
+    actual_group_name: cleanText(item.group.title, 160),
+    item_name: cleanText(item.name, 160),
+    populated_fields: Object.entries(actual)
+      .filter(([, value]) => Boolean(value))
+      .map(([field]) => field)
+  };
 }
 
 function findMondayInvalidColumnId(error) {
@@ -8395,7 +8509,10 @@ async function executeDougTool(call, name, args, sessionCallPhase) {
 }
 
 const wixSbaIntakeHandlers = createWixSbaIntakeHandlers({
-  createItem: createInboundCallerItem,
+  createItem: (data) => createInboundCallerItem(data, {
+    targetGroupName: "New Leads"
+  }),
+  verifyItem: verifyWixSbaMondayItem,
   log: inboundLog,
   boardId: MONDAY_BOARD_ID,
   cleanText,
