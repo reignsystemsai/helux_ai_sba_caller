@@ -97,6 +97,7 @@ test("analyzer Monday mutation preserves the supplied existing item ID", () => {
   assert.match(handler, /updateItem\(mondayItemId, patch\)/);
   assert.match(server, /itemId: String\(itemId\)/);
   assert.match(server, /loadInboundMondayMetadata\(true\)/);
+  assert.match(server, /create_labels_if_missing: true/);
   assert.match(server, /\[SBA_ANALYZER_UPDATE\].*mapped_column_values/);
   assert.match(server, /\[SBA_ANALYZER_UPDATE\].*monday_response/);
 });

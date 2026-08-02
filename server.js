@@ -4253,10 +4253,20 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
       column_ids: pendingColumnIds
     });
     try {
+      const updateMutation = options.analyzerDiagnostics
+        ? `mutation UpdateInboundCaller($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
+            change_multiple_column_values(
+              board_id: $boardId,
+              item_id: $itemId,
+              column_values: $columnValues,
+              create_labels_if_missing: true
+            ) { id }
+          }`
+        : `mutation UpdateInboundCaller($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
+            change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) { id }
+          }`;
       const result = await mondayGraphql(
-        `mutation UpdateInboundCaller($boardId: ID!, $itemId: ID!, $columnValues: JSON!) {
-          change_multiple_column_values(board_id: $boardId, item_id: $itemId, column_values: $columnValues) { id }
-        }`,
+        updateMutation,
         {
           boardId: MONDAY_BOARD_ID,
           itemId: String(itemId),
