@@ -4101,6 +4101,61 @@ async function updateWixSbaAnalyzerItem(itemId, data = {}) {
   });
 }
 
+async function verifyWixSbaAnalyzerItem(itemId, expected = {}) {
+  const item = await readInboundCallerItem(itemId);
+  if (!item?.id || String(item.id) !== String(itemId)) {
+    throw new Error(`Monday item ${itemId} was not returned by analyzer read-back.`);
+  }
+  if (String(item.board?.id || "") !== MONDAY_BOARD_ID) {
+    throw new Error(
+      `Monday item ${itemId} is on board ${item.board?.id || "unknown"}, expected ${MONDAY_BOARD_ID}.`
+    );
+  }
+
+  const actual = {
+    monthly_business_expenses: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.monthlyBusinessExpenses),
+      120
+    ),
+    years_in_business: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.yearsInBusiness),
+      120
+    ),
+    tax_filing_status: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.taxFilingStatus),
+      120
+    ),
+    average_ending_bank_balance: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.averageEndingBankBalance),
+      120
+    ),
+    estimated_credit_score: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.estimatedCreditScore),
+      120
+    ),
+    gross_monthly_revenue: cleanText(
+      inboundMondayItemValue(item, INBOUND_MONDAY.columns.grossMonthlyRevenue),
+      120
+    )
+  };
+  const verifiedFields = Object.keys(expected).filter((field) => {
+    if (field === "years_in_business") {
+      return Number.isFinite(Number(actual[field])) &&
+        Number(actual[field]) === Number(expected[field]);
+    }
+    return normalizeMondayKey(actual[field]) === normalizeMondayKey(expected[field]);
+  });
+  const missingFields = Object.keys(expected).filter(
+    (field) => !verifiedFields.includes(field)
+  );
+  if (missingFields.length) {
+    throw new Error(
+      `Monday analyzer read-back mismatch: ${missingFields.join(", ")}.`
+    );
+  }
+  return { item_id: String(item.id), verified_fields: verifiedFields };
+}
+
 function findMondayInvalidColumnId(error) {
   const errors = Array.isArray(error?.mondayErrors) ? error.mondayErrors : [];
   const missingColumnError = errors.find((entry) => {
@@ -4177,6 +4232,11 @@ async function updateInboundCallerItem(itemId, data = {}, options = {}) {
           sanitizeMondayDiagnosticColumn(columnId, value)
         ])
       )
+    });
+    inboundLog("[SBA_ANALYZER_UPDATE]", "mapped_columns", {
+      monday_item_id: String(itemId),
+      board_id: MONDAY_BOARD_ID,
+      column_ids: Object.keys(columnValues)
     });
   }
   if (diagnostic) {
@@ -8591,6 +8651,7 @@ const wixSbaIntakeHandlers = createWixSbaIntakeHandlers({
 const wixSbaAnalyzerHandlers = createWixSbaAnalyzerHandlers({
   findItem: readInboundCallerItem,
   updateItem: updateWixSbaAnalyzerItem,
+  verifyItem: verifyWixSbaAnalyzerItem,
   log: inboundLog,
   boardId: MONDAY_BOARD_ID,
   cleanText,

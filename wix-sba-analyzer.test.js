@@ -49,6 +49,10 @@ function makeHandlers(overrides = {}) {
         sba_written_logical_fields: Object.keys(patch)
       };
     },
+    verifyItem: async (itemId, patch) => ({
+      item_id: itemId,
+      verified_fields: Object.keys(patch)
+    }),
     log: (prefix, event, details) => logs.push({ prefix, event, details }),
     boardId: "18414546873",
     cleanText: (value, maximum = 255) => {
@@ -140,14 +144,17 @@ test("analyzer updates the existing item without forwarding scoring-only fields"
   assert.deepEqual(logs.map(({ event }) => event), [
     "received",
     "monday_item_id",
+    "item_id",
+    "incoming_fields",
     "incoming_updateData",
     "received",
     "normalized_values",
+    "readback_verified",
     "monday_update_success",
     "monday_update_success"
   ]);
   assert.equal(logs[0].prefix, "[SBA_ANALYZER_UPDATE]");
-  assert.deepEqual(logs[2].details.incoming_field_names, [
+  assert.deepEqual(logs[4].details.incoming_field_names, [
     "monthly_business_expenses",
     "years_in_business",
     "tax_filing_status",
@@ -158,6 +165,32 @@ test("analyzer updates the existing item without forwarding scoring-only fields"
     "funding_range"
   ]);
   assert.equal(logs.at(-1).prefix, "[SBA_ANALYZER_UPDATE]");
+});
+
+test("analyzer accepts the update_data payload alias", async () => {
+  const { handlers, updates } = makeHandlers();
+  const body = validBody();
+  body.update_data = body.updateData;
+  delete body.updateData;
+  const res = mockResponse();
+  await handlers.post(request(body), res);
+  assert.equal(res.statusCode, 200);
+  assert.equal(res.body.success, true);
+  assert.equal(updates.length, 1);
+});
+
+test("analyzer returns failure when Monday read-back does not verify values", async () => {
+  const { handlers } = makeHandlers({
+    verifyItem: async (itemId) => ({
+      item_id: itemId,
+      verified_fields: ["monthly_business_expenses"]
+    })
+  });
+  const res = mockResponse();
+  await handlers.post(request(validBody()), res);
+  assert.equal(res.statusCode, 502);
+  assert.equal(res.body.success, false);
+  assert.match(res.body.error, /read-back did not verify fields/);
 });
 
 test("missing or unknown item IDs fail without calling the update mutation", async () => {

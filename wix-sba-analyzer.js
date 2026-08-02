@@ -69,6 +69,7 @@ function normalizeTaxFilingStatus(value) {
 function createWixSbaAnalyzerHandlers({
   findItem,
   updateItem,
+  verifyItem,
   log,
   boardId,
   cleanText,
@@ -76,8 +77,12 @@ function createWixSbaAnalyzerHandlers({
   normalizeCreditScore,
   normalizeRevenueRange
 }) {
-  if (typeof findItem !== "function" || typeof updateItem !== "function") {
-    throw new TypeError("findItem and updateItem are required.");
+  if (
+    typeof findItem !== "function" ||
+    typeof updateItem !== "function" ||
+    typeof verifyItem !== "function"
+  ) {
+    throw new TypeError("findItem, updateItem, and verifyItem are required.");
   }
 
   function failed(res, statusCode, mondayItemId, error) {
@@ -107,7 +112,9 @@ function createWixSbaAnalyzerHandlers({
     const mondayItemId = cleanText(body.monday_item_id, 100);
     const updateData = body.updateData && typeof body.updateData === "object"
       ? body.updateData
-      : {};
+      : body.update_data && typeof body.update_data === "object"
+        ? body.update_data
+        : {};
     const receivedFields = WIX_SBA_ANALYZER_FIELDS.filter((field) =>
       nonblank(updateData[field])
     );
@@ -116,6 +123,12 @@ function createWixSbaAnalyzerHandlers({
     });
     log("[SBA_ANALYZER_UPDATE]", "monday_item_id", {
       monday_item_id: mondayItemId || null
+    });
+    log("[SBA_ANALYZER_UPDATE]", "item_id", {
+      item_id: mondayItemId || null
+    });
+    log("[SBA_ANALYZER_UPDATE]", "incoming_fields", {
+      incoming_fields: Object.keys(updateData)
     });
     log("[SBA_ANALYZER_UPDATE]", "incoming_updateData", {
       monday_item_id: mondayItemId || null,
@@ -217,6 +230,23 @@ function createWixSbaAnalyzerHandlers({
           `Monday did not confirm fields: ${missingFields.join(", ")}.`
         );
       }
+
+      const readback = await verifyItem(mondayItemId, patch);
+      const verifiedFields = Array.isArray(readback?.verified_fields)
+        ? readback.verified_fields
+        : [];
+      const unverifiedFields = Object.keys(patch).filter(
+        (field) => !verifiedFields.includes(field)
+      );
+      if (unverifiedFields.length) {
+        throw new Error(
+          `Monday read-back did not verify fields: ${unverifiedFields.join(", ")}.`
+        );
+      }
+      log("[SBA_ANALYZER_UPDATE]", "readback_verified", {
+        item_id: mondayItemId,
+        verified_fields: verifiedFields
+      });
 
       log("[WIX_SBA_ANALYZER]", "monday_update_success", {
         monday_item_id: mondayItemId,
