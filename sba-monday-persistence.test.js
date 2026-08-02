@@ -25,6 +25,7 @@ const metadata = {
     { id: SBA_BOARD.columns.updatedDate, title: "Updated_date", type: "date" },
     { id: SBA_BOARD.columns.zip, title: "Zip", type: "numbers" },
     { id: SBA_BOARD.columns.leadId, title: "Lead_id", type: "text" },
+    { id: SBA_BOARD.columns.fundingGoal, title: "Funding Goal", type: "text" },
     { id: SBA_BOARD.columns.source, title: "Source", type: "text" },
     {
       id: SBA_BOARD.columns.businessEntityType,
@@ -232,6 +233,15 @@ test("last name and lead source use the exact supplied SBA columns", () => {
   assert.equal(values.text_mm3mx5w, undefined);
 });
 
+test("funding goal uses the exact supplied SBA text column", () => {
+  const values = buildSbaMondayUpdateValues({
+    data: { funding_goal: "$100,000" },
+    metadata
+  });
+  assert.equal(SBA_BOARD.columns.fundingGoal, "text_mm5vct3n");
+  assert.equal(values.text_mm5vct3n, "$100,000");
+});
+
 test("SBA Source supports acquisition classification values", () => {
   for (const source of ["Inbound - Website", "Inbound - Phone", "Outbound"]) {
     const values = buildSbaMondayUpdateValues({ data: { source }, metadata });
@@ -259,6 +269,7 @@ test("all valid supplied SBA intake fields retain their existing Monday mappings
       income_status: "Done",
       updated_date: "2026-08-01T12:00:00.000Z",
       lead_id: "LEAD-100",
+      funding_goal: "$100,000",
       source: "Inbound - Website"
     },
     metadata: {
@@ -289,6 +300,7 @@ test("all valid supplied SBA intake fields retain their existing Monday mappings
     SBA_BOARD.columns.incomeStatus,
     SBA_BOARD.columns.updatedDate,
     SBA_BOARD.columns.leadId,
+    SBA_BOARD.columns.fundingGoal,
     SBA_BOARD.columns.source
   ]) {
     assert.ok(Object.hasOwn(values, columnId), `${columnId} must be in the mutation payload`);

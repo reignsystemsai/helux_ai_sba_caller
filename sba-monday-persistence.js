@@ -18,6 +18,7 @@ const SBA_QUALIFICATION_COLUMN_IDS = Object.freeze({
   city: SBA_BOARD.columns.city,
   updated_date: SBA_BOARD.columns.updatedDate,
   lead_id: SBA_BOARD.columns.leadId,
+  funding_goal: SBA_BOARD.columns.fundingGoal,
   source: SBA_BOARD.columns.source
 });
 
@@ -39,6 +40,7 @@ const SBA_MAIN_BOARD_FIELD_COLUMNS = Object.freeze({
   city: SBA_BOARD.columns.city,
   zip: SBA_BOARD.columns.zip,
   lead_id: SBA_BOARD.columns.leadId,
+  funding_goal: SBA_BOARD.columns.fundingGoal,
   source: SBA_BOARD.columns.source
 });
 
@@ -220,6 +222,7 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
     "taxes",
     "city",
     "lead_id",
+    "funding_goal",
     "source"
   ]) {
     const value = clean(data[field]);

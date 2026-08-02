@@ -36,6 +36,7 @@ const SBA_BOARD = Object.freeze({
     city: null,
     zip: "numeric_mm4nnp3g",
     leadId: "text_mm4nxye8",
+    fundingGoal: "text_mm5vct3n",
     source: "text_mm5vdf21"
   }),
   subitemColumns: Object.freeze({
