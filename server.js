@@ -30,6 +30,10 @@ const {
   sbaLogicalFieldForColumnId,
   selectBestSbaMondayMatch
 } = require("./sba-monday-persistence");
+const {
+  WIX_SBA_INTAKE_PATH,
+  createWixSbaIntakeHandlers
+} = require("./wix-sba-intake");
 
 /* Inlined production dependencies — formerly ./src modules */
 
@@ -8368,6 +8372,22 @@ async function executeDougTool(call, name, args, sessionCallPhase) {
   }
   return { success: false, error: `Unknown tool: ${name}` };
 }
+
+const wixSbaIntakeHandlers = createWixSbaIntakeHandlers({
+  createItem: createInboundCallerItem,
+  log: inboundLog,
+  boardId: MONDAY_BOARD_ID,
+  cleanText,
+  normalizeEmail: normalizeInboundEmail,
+  normalizePhone,
+  validPhone: validE164Phone,
+  normalizeEntityType: normalizeSbaEntityType,
+  normalizeCreditScore: normalizeSbaCreditRange,
+  normalizeRevenueRange: normalizeSbaRevenueRange
+});
+
+app.options(WIX_SBA_INTAKE_PATH, wixSbaIntakeHandlers.options);
+app.post(WIX_SBA_INTAKE_PATH, wixSbaIntakeHandlers.post);
 
 app.get("/", (req, res) => {
   res.json({
