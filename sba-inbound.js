@@ -37,6 +37,10 @@ const SBA_BOARD = Object.freeze({
     zip: "numeric_mm4nnp3g",
     leadId: "text_mm4nxye8",
     fundingGoal: "text_mm5vct3n",
+    monthlyBusinessExpenses: "text_mm5vkcca",
+    yearsInBusiness: "numeric_mm5vcmax",
+    taxFilingStatus: "color_mm5vz63f",
+    averageEndingBankBalance: "text_mm5vb1v",
     source: "text_mm5vdf21"
   }),
   subitemColumns: Object.freeze({

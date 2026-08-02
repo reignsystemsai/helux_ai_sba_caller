@@ -19,6 +19,10 @@ const SBA_QUALIFICATION_COLUMN_IDS = Object.freeze({
   updated_date: SBA_BOARD.columns.updatedDate,
   lead_id: SBA_BOARD.columns.leadId,
   funding_goal: SBA_BOARD.columns.fundingGoal,
+  monthly_business_expenses: SBA_BOARD.columns.monthlyBusinessExpenses,
+  years_in_business: SBA_BOARD.columns.yearsInBusiness,
+  tax_filing_status: SBA_BOARD.columns.taxFilingStatus,
+  average_ending_bank_balance: SBA_BOARD.columns.averageEndingBankBalance,
   source: SBA_BOARD.columns.source
 });
 
@@ -41,6 +45,10 @@ const SBA_MAIN_BOARD_FIELD_COLUMNS = Object.freeze({
   zip: SBA_BOARD.columns.zip,
   lead_id: SBA_BOARD.columns.leadId,
   funding_goal: SBA_BOARD.columns.fundingGoal,
+  monthly_business_expenses: SBA_BOARD.columns.monthlyBusinessExpenses,
+  years_in_business: SBA_BOARD.columns.yearsInBusiness,
+  tax_filing_status: SBA_BOARD.columns.taxFilingStatus,
+  average_ending_bank_balance: SBA_BOARD.columns.averageEndingBankBalance,
   source: SBA_BOARD.columns.source
 });
 
@@ -223,6 +231,8 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
     "city",
     "lead_id",
     "funding_goal",
+    "monthly_business_expenses",
+    "average_ending_bank_balance",
     "source"
   ]) {
     const value = clean(data[field]);
@@ -241,6 +251,12 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
   if (zip) {
     const column = mappedSbaMainBoardColumn(metadata, "zip", skip);
     if (column) values[column.id] = zip;
+  }
+
+  if (meaningful(data.years_in_business)) {
+    const years = Number(data.years_in_business);
+    const column = mappedSbaMainBoardColumn(metadata, "years_in_business", skip);
+    if (column && Number.isFinite(years)) values[column.id] = years;
   }
 
   for (const field of [
@@ -265,6 +281,7 @@ function buildSbaMondayUpdateValues({ data = {}, metadata, onSkippedColumn }) {
   for (const field of [
     "entity_status",
     "tax_status",
+    "tax_filing_status",
     "credit_status",
     "income_status"
   ]) {

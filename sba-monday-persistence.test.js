@@ -26,6 +26,34 @@ const metadata = {
     { id: SBA_BOARD.columns.zip, title: "Zip", type: "numbers" },
     { id: SBA_BOARD.columns.leadId, title: "Lead_id", type: "text" },
     { id: SBA_BOARD.columns.fundingGoal, title: "Funding Goal", type: "text" },
+    {
+      id: SBA_BOARD.columns.monthlyBusinessExpenses,
+      title: "Monthly Business Expenses",
+      type: "text"
+    },
+    {
+      id: SBA_BOARD.columns.yearsInBusiness,
+      title: "Years in Business",
+      type: "numbers"
+    },
+    {
+      id: SBA_BOARD.columns.taxFilingStatus,
+      title: "Tax Filing Status",
+      type: "color",
+      settings: {
+        labels: {
+          1: "I need to file",
+          2: "I have - 1yr tax return",
+          3: "I have - 2yrs tax returns",
+          4: "I have - 3yr tax returns"
+        }
+      }
+    },
+    {
+      id: SBA_BOARD.columns.averageEndingBankBalance,
+      title: "Average Ending Bank Balance",
+      type: "text"
+    },
     { id: SBA_BOARD.columns.source, title: "Source", type: "text" },
     {
       id: SBA_BOARD.columns.businessEntityType,
@@ -240,6 +268,36 @@ test("funding goal uses the exact supplied SBA text column", () => {
   });
   assert.equal(SBA_BOARD.columns.fundingGoal, "text_mm5vct3n");
   assert.equal(values.text_mm5vct3n, "$100,000");
+});
+
+test("SBA analyzer values use only the supplied main-board mappings", () => {
+  const values = buildSbaMondayUpdateValues({
+    data: {
+      monthly_business_expenses: "$8,500",
+      years_in_business: 2,
+      tax_filing_status: "I have - 2yrs tax returns",
+      average_ending_bank_balance: "$14,000",
+      estimated_credit_score: "680+",
+      gross_monthly_revenue: "$5,000 - $25,000",
+      estimated_cash_flow: "$2,000",
+      funding_range: "$50,000 - $75,000"
+    },
+    metadata
+  });
+  assert.equal(values.text_mm5vkcca, "$8,500");
+  assert.equal(values.numeric_mm5vcmax, 2);
+  assert.deepEqual(values.color_mm5vz63f, {
+    label: "I have - 2yrs tax returns"
+  });
+  assert.equal(values.text_mm5vb1v, "$14,000");
+  assert.deepEqual(values[SBA_BOARD.columns.estimatedCreditScore], {
+    labels: ["680+"]
+  });
+  assert.deepEqual(values[SBA_BOARD.columns.grossMonthlyRevenue], {
+    labels: ["$5,000 - $25,000"]
+  });
+  assert.equal(Object.values(values).includes("$2,000"), false);
+  assert.equal(Object.values(values).includes("$50,000 - $75,000"), false);
 });
 
 test("SBA Source supports acquisition classification values", () => {

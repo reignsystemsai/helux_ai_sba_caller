@@ -34,6 +34,10 @@ const {
   WIX_SBA_INTAKE_PATH,
   createWixSbaIntakeHandlers
 } = require("./wix-sba-intake");
+const {
+  WIX_SBA_ANALYZER_PATH,
+  createWixSbaAnalyzerHandlers
+} = require("./wix-sba-analyzer");
 
 /* Inlined production dependencies — formerly ./src modules */
 
@@ -4069,6 +4073,29 @@ async function verifyWixSbaMondayItem(itemId, expected = {}) {
       .filter(([, value]) => Boolean(value))
       .map(([field]) => field)
   };
+}
+
+async function updateWixSbaAnalyzerItem(itemId, data = {}) {
+  if (data.tax_filing_status) {
+    const metadata = await loadInboundMondayMetadata(false);
+    const column = inboundMondayColumn(
+      metadata,
+      INBOUND_MONDAY.columns.taxFilingStatus
+    );
+    if (!column) {
+      throw new Error(
+        `SBA tax filing status column ${INBOUND_MONDAY.columns.taxFilingStatus} was not found.`
+      );
+    }
+    const label = resolveInboundMondayLabel(column, data.tax_filing_status);
+    if (!label) {
+      throw new Error(
+        `Monday Status label is unavailable: ${data.tax_filing_status}.`
+      );
+    }
+    data = { ...data, tax_filing_status: label };
+  }
+  return updateInboundCallerItem(itemId, data);
 }
 
 function findMondayInvalidColumnId(error) {
@@ -8524,8 +8551,20 @@ const wixSbaIntakeHandlers = createWixSbaIntakeHandlers({
   normalizeRevenueRange: normalizeSbaRevenueRange
 });
 
+const wixSbaAnalyzerHandlers = createWixSbaAnalyzerHandlers({
+  findItem: readInboundCallerItem,
+  updateItem: updateWixSbaAnalyzerItem,
+  log: inboundLog,
+  boardId: MONDAY_BOARD_ID,
+  cleanText,
+  normalizeCreditScore: normalizeSbaCreditRange,
+  normalizeRevenueRange: normalizeSbaRevenueRange
+});
+
 app.options(WIX_SBA_INTAKE_PATH, wixSbaIntakeHandlers.options);
 app.post(WIX_SBA_INTAKE_PATH, wixSbaIntakeHandlers.post);
+app.options(WIX_SBA_ANALYZER_PATH, wixSbaAnalyzerHandlers.options);
+app.post(WIX_SBA_ANALYZER_PATH, wixSbaAnalyzerHandlers.post);
 
 app.get("/", (req, res) => {
   res.json({
